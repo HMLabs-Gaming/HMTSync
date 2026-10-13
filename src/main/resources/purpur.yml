@@ -1,0 +1,25 @@
+main: de.jumpstone.plugins.HMTSync
+version: 2.2.3
+name: HMTSync
+author: jumpstone
+api-version: '26.3'
+folia-supported: true
+permissions:
+  hmtsync.admin:
+    description: Allows use of admin commands for HMTSync
+    default: op
+  hmtsync.inspect:
+    description: Allows view-only inspection of player data and inventories
+    default: op
+  hmtsync.inspect.edit:
+    description: Allows interactive editing of player data and inventories
+    default: op
+commands:
+  hmtsync:
+    description: Main command for HMTSync
+    usage: /hmtsync <subcommand>
+    permission: hmtsync.admin
+  hmtsync-debug:
+    description: Debug and diagnostics for HMTSync (economy, playtime, Redis cache)
+    usage: /hmtsync-debug <subcommand>
+    permission: hmtsync.admin

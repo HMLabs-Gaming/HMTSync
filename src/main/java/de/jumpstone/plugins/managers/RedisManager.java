@@ -251,21 +251,23 @@ public class RedisManager {
     }
 
     /**
-     * Add player to pending saves queue for MySQL sync
+     * Record that a server has flushed a player's payload, so the event can be
+     * audited later. The JSON body is intentionally not stored here: the SQL
+     * row remains authoritative and Redis only holds the short-lived cache copy.
+     *
+     * @param uuid          Player UUID
+     * @param sourceServer  Server that performed the save
      */
-    public boolean addToPendingSaves(UUID uuid, String jsonData, String sourceServer) {
+    public boolean addToPendingSaves(UUID uuid, String sourceServer) {
         if (!isAvailable()) {
             return false;
         }
 
         try (Jedis jedis = jedisPool.getResource()) {
-            String saveEntry = uuid.toString() + "|" + System.currentTimeMillis() + "|" + sourceServer;
-            jedis.lpush(PENDING_SAVES_KEY, saveEntry);
-            return true;
+            String saveEntry = uuid + "|" + System.currentTimeMillis() + "|" + sourceServer;
+            return jedis.lpush(PENDING_SAVES_KEY, saveEntry) > 0;
         } catch (JedisException e) {
-            if (logger != null) {
-                logger.severe("[HMTSync-Redis] Failed to add pending save for " + uuid + ": " + e.getMessage());
-            }
+            logger.severe("[HMTSync-Redis] Failed to add pending save for " + uuid + ": " + e.getMessage());
             return false;
         }
     }

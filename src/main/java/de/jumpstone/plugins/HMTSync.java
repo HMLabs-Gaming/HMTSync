@@ -12,419 +12,193 @@ import org.bukkit.plugin.java.JavaPlugin;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.sql.Statement;
 
 public class HMTSync extends JavaPlugin {
 
     private DatabaseManager databaseManager;
-    private EconomyManager economyManager;
-    private PlaytimeManager playtimeManager;
-    private RedisManager redisManager;
     private boolean debugMode;
     private String serverId;
     private String tableName;
-    private boolean redisEnabled = false;
+    private String securitySeed;
+    private String identityMode;
+    private boolean autoMigrateFastLogin;
+    private boolean autoMigrateAuthMe;
+    private PlayerListener playerListener;
+    private EconomyManager economyManager;
+    private PlaytimeManager playtimeManager;
+    private RedisManager redisManager;
+    private boolean redisEnabled;
     private static final Gson GSON = new GsonBuilder().create();
+    private static final String BANNER = "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!";
+    private static final String DEFAULT_TABLE_NAME = "player_data";
+    private static final String PLUGIN_CHANNEL = "hmt-sync:main";
+    private static final String SQLITE = "sqlite";
+    private static final String ALTER_TABLE_SQL = "ALTER TABLE ";
+    private static final String SYNC_DATA_PREFIX = "sync-data.";
+    private static final String INTEGER_DEFAULT_0 = "INTEGER DEFAULT 0";
+    private static final String TEXT_DEFAULT_NULL = "TEXT DEFAULT NULL";
+    private static final String BIGINT_DEFAULT_0 = "BIGINT DEFAULT 0";
+    private static final String VARCHAR64_DEFAULT_NULL = "VARCHAR(64) DEFAULT NULL";
+    private static final String CONFIG_TABLE_PREFIX = "table-prefix";
+    private static final String DEFAULT_SEED = "change-me-to-a-long-random-string";
+    private static final String CREATE_TABLE_IF_NOT_EXISTS = "CREATE TABLE IF NOT EXISTS ";
+    private static final String AUTO_UPDATE_SCHEMA = "auto-update-schema";
 
     @Override
     public void onEnable() {
-        // Detect platform and initialize appropriate implementation
-        String platform = detectPlatform();
-
-        switch (platform.toLowerCase()) {
-            case "spigot":
-            case "paper":
-            case "bukkit":
-                startSpigot();
-                break;
-            case "velocity":
-                getLogger().severe(
-                        "This JAR is intended for Spigot/Paper servers only. For Velocity, use the Velocity-specific build or remove plugin.yml from this JAR.");
-                getServer().getPluginManager().disablePlugin(this);
-                return;
-            case "bungee":
-            case "bungeecord":
-                getLogger().severe(
-                        "This JAR is intended for Spigot/Paper servers only. For BungeeCord, use the BungeeCord-specific build or remove plugin.yml from this JAR.");
-                getServer().getPluginManager().disablePlugin(this);
-                return;
-            default:
-                getLogger().warning("Unknown platform detected: " + platform + ". Assuming Spigot/Paper.");
-                startSpigot();
-                break;
-        }
+        // Platform detection will be implemented here later
+        startSpigot();
     }
 
-    private String detectPlatform() {
-        try {
-            // Check if we're running on Velocity
-            Class.forName("com.velocitypowered.api.plugin.Plugin");
-            return "velocity";
-        } catch (ClassNotFoundException e) {
-            // Not Velocity
-        }
+    private static final java.util.Map<String, java.util.Map.Entry<String, String>> COLUMN_WHITELIST = java.util.Map.of(
+            "is_locked", java.util.Map.entry("BOOLEAN DEFAULT 0", INTEGER_DEFAULT_0),
+            "locking_server", java.util.Map.entry("VARCHAR(255) DEFAULT NULL", TEXT_DEFAULT_NULL),
+            "lock_timestamp", java.util.Map.entry(BIGINT_DEFAULT_0, INTEGER_DEFAULT_0),
+            "lock_version", java.util.Map.entry(BIGINT_DEFAULT_0, INTEGER_DEFAULT_0),
+            "snapshot_checksum", java.util.Map.entry(VARCHAR64_DEFAULT_NULL, TEXT_DEFAULT_NULL),
+            "last_known_name", java.util.Map.entry("VARCHAR(16) DEFAULT NULL", TEXT_DEFAULT_NULL),
+            "data_checksum", java.util.Map.entry(VARCHAR64_DEFAULT_NULL, TEXT_DEFAULT_NULL),
+            "identity_hash", java.util.Map.entry(VARCHAR64_DEFAULT_NULL, TEXT_DEFAULT_NULL),
+            "name_last_updated", java.util.Map.entry(BIGINT_DEFAULT_0, INTEGER_DEFAULT_0),
+            "last_updated", java.util.Map.entry("TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP",
+                    "DATETIME DEFAULT CURRENT_TIMESTAMP"));
 
-        try {
-            // Check if we're running on BungeeCord
-            Class.forName("net.md_5.bungee.api.plugin.Plugin");
-            return "bungee";
-        } catch (ClassNotFoundException e) {
-            // Not BungeeCord
-        }
-
-        // Assume Spigot/Paper if neither Velocity nor BungeeCord classes are found
-        return "spigot";
-    }
 
     private void startSpigot() {
         saveDefaultConfig();
         updateConfig(); // Check and update config if missing new keys
         this.debugMode = getConfig().getBoolean("debug", false);
         this.serverId = getConfig().getString("server-id", "default-server");
-        this.tableName = getConfig().getString("table-prefix", "") + "player_data";
+        String tablePrefix = getConfig().getString(CONFIG_TABLE_PREFIX, "");
+        if (!tablePrefix.isEmpty() && !tablePrefix.matches("\\w+")) {
+            getLogger().severe(BANNER);
+            getLogger().log(java.util.logging.Level.SEVERE, "!!! INVALID table-prefix: {0}", tablePrefix);
+            getLogger().severe("!!! Only alphanumeric characters and underscores are allowed.");
+            getLogger().severe("!!! Plugin will now disable to prevent SQL errors.   !!!");
+            getLogger().severe(BANNER);
+            getServer().getPluginManager().disablePlugin(this);
+            return;
+        }
+        this.tableName = tablePrefix + DEFAULT_TABLE_NAME;
         if (this.serverId.equals("default-server")) {
-            getLogger().warning("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+            getLogger().warning(BANNER);
             getLogger().warning("!!! Server-id is not set in config.yml. Using default. !!!");
             getLogger().warning("!!! This is UNSAFE for multi-server setups.           !!!");
-            getLogger().warning("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+            getLogger().warning(BANNER);
         }
+
+        this.securitySeed = getConfig().getString("security.seed", DEFAULT_SEED);
+        if (this.securitySeed == null || this.securitySeed.isEmpty() || this.securitySeed.equals(DEFAULT_SEED)) {
+            String legacySeed = getConfig().getString("identity.seed", null);
+            if (legacySeed != null && !legacySeed.isEmpty() && !legacySeed.equals(DEFAULT_SEED)) {
+                this.securitySeed = legacySeed;
+            }
+        }
+        if (this.securitySeed == null || this.securitySeed.isEmpty() || this.securitySeed.equals(DEFAULT_SEED)) {
+            String envSeed = System.getenv("HMTSYNC_SEED");
+            if (envSeed != null && !envSeed.isEmpty() && !envSeed.equals(DEFAULT_SEED)) {
+                this.securitySeed = envSeed;
+                getLogger().info("Loaded secure security seed from environment variable HMTSYNC_SEED.");
+            } else {
+                getLogger().severe(BANNER);
+                getLogger().severe("!!! CRITICAL SECURITY ERROR: security.seed IS NOT CONFIGURED !!!");
+                getLogger().severe("!!! You must set a custom security seed in config.yml or    !!!");
+                getLogger().severe("!!! pass it via the HMTSYNC_SEED environment variable.    !!!");
+                getLogger().severe("!!! The engine will now forcefully disable itself immediately. !!!");
+                getLogger().severe(BANNER);
+                getServer().getPluginManager().disablePlugin(this);
+                return;
+            }
+        }
+
+        this.identityMode = getConfig().getString("identity.mode", "PREMIUM").toUpperCase();
+        this.autoMigrateFastLogin = getConfig().getBoolean("identity.auto-migrate-fastlogin", false);
+        this.autoMigrateAuthMe = getConfig().getBoolean("identity.auto-migrate-authme", false);
         databaseManager = new DatabaseManager(getConfig(), this.tableName);
+        databaseManager.setLogger(getLogger());
         economyManager = new EconomyManager();
         playtimeManager = new PlaytimeManager();
 
-        // Initialize Redis if enabled
+        // Initialize Redis if the hybrid storage strategy is enabled
         initializeRedis();
 
-        getServer().getScheduler().runTaskAsynchronously(this, this::createServerTable);
-        getServer().getScheduler().runTaskAsynchronously(this, this::releaseOrphanedLocks);
-
-        // Log manager statuses
-        if (debugMode) {
-            getLogger().info("Economy Manager enabled: " + economyManager.isEnabled());
-            getLogger().info("Playtime Manager enabled: " + playtimeManager.isEnabled());
+        // Initialize Metrics Exporter if enabled
+        if (getConfig().getBoolean("metrics.enabled", false)) {
+            int metricsPort = getConfig().getInt("metrics.port", 8080);
+            String metricsPath = getConfig().getString("metrics.path", "/metrics");
+            de.jumpstone.plugins.managers.MetricsManager.getInstance().start(this, databaseManager,
+                    metricsPort, metricsPath);
         }
+
+        // Ensure table and columns exist synchronously before events are registered
+        createServerTable();
+
+        de.jumpstone.plugins.utils.SchedulerUtils.runAsync(this, this::releaseOrphanedLocks);
 
         // Create the listener instance
-        PlayerListener playerListener = new PlayerListener(databaseManager, this);
+        this.playerListener = new PlayerListener(databaseManager, this);
 
         // Register its Bukkit events
-        getServer().getPluginManager().registerEvents(playerListener, this);
+        getServer().getPluginManager().registerEvents(this.playerListener, this);
 
-        // Register Commands
-        if (getCommand("hmtsync") != null) {
-            getCommand("hmtsync")
-                    .setExecutor(new de.jumpstone.plugins.commands.UnlockCommand(databaseManager));
+        // Register AuthMe auto-migration listener if enabled
+        if (getServer().getPluginManager().isPluginEnabled("AuthMe")) {
+            getServer().getPluginManager().registerEvents(
+                    new de.jumpstone.plugins.listeners.AuthMeListener(this, databaseManager), this);
+            getLogger().info("AuthMe integration enabled for auto-migration.");
         }
 
-        // Register Debug Command
-        if (getCommand("hmtsync-debug") != null) {
-            getCommand("hmtsync-debug")
-                    .setExecutor(new de.jumpstone.plugins.commands.DebugCommand(this));
+        // Initialize GUI Manager and register GUI click listener
+        de.jumpstone.plugins.utils.DataManagementGUI guiManager = new de.jumpstone.plugins.utils.DataManagementGUI(this, databaseManager);
+        getServer().getPluginManager().registerEvents(guiManager, this);
+
+        org.bukkit.command.PluginCommand cmd = getCommand("hmtsync");
+        if (cmd != null) {
+            de.jumpstone.plugins.commands.SyncCommand bridgeCmd = new de.jumpstone.plugins.commands.SyncCommand(databaseManager, guiManager);
+            cmd.setExecutor(bridgeCmd);
+            cmd.setTabCompleter(bridgeCmd);
+        }
+
+        // Register the HMTSync-specific debug command
+        org.bukkit.command.PluginCommand debugCmd = getCommand("hmtsync-debug");
+        if (debugCmd != null) {
+            debugCmd.setExecutor(new de.jumpstone.plugins.commands.DebugCommand(this));
         }
 
         // Register it as the listener for our custom plugin channel
-        this.getServer().getMessenger().registerIncomingPluginChannel(this, "hmt-sync:main", playerListener);
-        this.getServer().getMessenger().registerOutgoingPluginChannel(this, "hmt-sync:main");
+        this.getServer().getMessenger().registerIncomingPluginChannel(this, PLUGIN_CHANNEL, this.playerListener);
+        this.getServer().getMessenger().registerOutgoingPluginChannel(this, PLUGIN_CHANNEL);
 
-        if (debugMode) {
-            getLogger().info("Registered 'hmt-sync:main' plugin channel.");
-        }
+        // Initialize Backup Manager
+        new de.jumpstone.plugins.managers.BackupManager(this, databaseManager);
 
-        getLogger().info("HMT Sync has been enabled on Spigot/Paper!");
+        getLogger().info("hmt-sync has been enabled on Spigot/Paper/Folia!");
     }
 
     @Override
     public void onDisable() {
-        this.getServer().getMessenger().unregisterIncomingPluginChannel(this, "hmt-sync:main");
-        this.getServer().getMessenger().unregisterOutgoingPluginChannel(this, "hmt-sync:main");
-
-        // Shutdown Redis connection if enabled
+        this.getServer().getMessenger().unregisterIncomingPluginChannel(this, PLUGIN_CHANNEL);
+        this.getServer().getMessenger().unregisterOutgoingPluginChannel(this, PLUGIN_CHANNEL);
+        if (playerListener != null) {
+            playerListener.shutdown();
+        }
+        if (databaseManager != null) {
+            databaseManager.close();
+        }
+        de.jumpstone.plugins.managers.MetricsManager.getInstance().stop();
         if (redisManager != null) {
             redisManager.shutdown();
-            getLogger().info("[HMTSync-Redis] Redis connection closed");
+            getLogger().info("[HMTSync-Redis] Redis connection pool closed");
         }
-
-        databaseManager.close();
-        getLogger().info("HMT Sync has been disabled!");
-    }
-
-    private void createServerTable() {
-        String escapedTableName = "`" + tableName + "`";
-        String createTableSQL = "CREATE TABLE IF NOT EXISTS " + escapedTableName + " (" +
-                "uuid VARCHAR(36) NOT NULL, " +
-                "data LONGTEXT, " +
-                "is_locked BOOLEAN DEFAULT 0, " +
-                "locking_server VARCHAR(255) DEFAULT NULL, " +
-                "lock_timestamp BIGINT DEFAULT 0, " +
-                "last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, " +
-                "PRIMARY KEY (uuid)) ENGINE=InnoDB;";
-
-        try (Connection connection = databaseManager.getConnection();
-                Statement statement = connection.createStatement()) {
-
-            // Check for migration from default 'player_data' to prefixed table
-            if (!tableName.equals("player_data")) {
-                try {
-                    ResultSet oldTable = connection.getMetaData().getTables(null, null, "player_data", null);
-                    boolean oldExists = oldTable.next();
-                    oldTable.close();
-
-                    ResultSet newTable = connection.getMetaData().getTables(null, null, tableName, null);
-                    boolean newExists = newTable.next();
-                    newTable.close();
-
-                    if (oldExists && !newExists) {
-                        getLogger().warning("Detected old 'player_data' table and new prefix setting.");
-                        getLogger().warning("Migrating 'player_data' to '" + tableName + "'...");
-                        statement.executeUpdate("RENAME TABLE `player_data` TO " + escapedTableName);
-                        getLogger().info("Migration successful!");
-                    }
-                } catch (Exception e) {
-                    getLogger().severe("Failed to migrate table: " + e.getMessage());
-                }
-            }
-
-            statement.executeUpdate(createTableSQL);
-            getLogger().info("Successfully verified or created the '" + tableName + "' table.");
-
-            if (!connection.getMetaData().getColumns(null, null, tableName, "is_locked").next()) {
-                statement.executeUpdate("ALTER TABLE " + escapedTableName + " ADD COLUMN is_locked BOOLEAN DEFAULT 0");
-            }
-            if (!connection.getMetaData().getColumns(null, null, tableName, "locking_server").next()) {
-                statement.executeUpdate(
-                        "ALTER TABLE " + escapedTableName + " ADD COLUMN locking_server VARCHAR(255) DEFAULT NULL");
-            }
-            if (!connection.getMetaData().getColumns(null, null, tableName, "lock_timestamp").next()) {
-                statement.executeUpdate(
-                        "ALTER TABLE " + escapedTableName + " ADD COLUMN lock_timestamp BIGINT DEFAULT 0");
-            }
-            if (!connection.getMetaData().getColumns(null, null, tableName, "last_updated").next()) {
-                statement.executeUpdate(
-                        "ALTER TABLE " + escapedTableName
-                                + " ADD COLUMN last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP");
-            }
-
-            ResultSet columns = connection.getMetaData().getColumns(null, null, tableName, "data");
-            if (columns.next()) {
-                String typeName = columns.getString("TYPE_NAME");
-                boolean needsMigration = "LONGTEXT".equalsIgnoreCase(typeName) || "TEXT".equalsIgnoreCase(typeName);
-
-                if (needsMigration) {
-                    if (getConfig().getBoolean("auto-update-schema", false)) {
-                        getLogger().info("Migrating 'data' column from " + typeName + " to LONGBLOB as requested...");
-                        statement
-                                .executeUpdate("ALTER TABLE " + escapedTableName + " MODIFY COLUMN data LONGBLOB NULL");
-                        getLogger().info("Migration complete! 'data' is now LONGBLOB.");
-                    } else {
-                        getLogger().warning("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
-                        getLogger().warning("!!! YOUR DATABASE IS USING '" + typeName + "' FOR 'data' COLUMN. !!!");
-                        getLogger().warning("!!! IT IS RECOMMENDED TO SWITCH TO 'LONGBLOB' !!!");
-                        getLogger().warning("!!! ENABLE 'auto-update-schema: true' IN CONFIG TO FIX AUTOMATICALLY !!!");
-                        getLogger().warning("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
-                    }
-                }
-
-                if ("NO".equalsIgnoreCase(columns.getString("IS_NULLABLE"))) {
-                    statement.executeUpdate("ALTER TABLE " + escapedTableName + " MODIFY COLUMN data LONGBLOB NULL");
-                }
-            }
-        } catch (Exception e) {
-            getLogger().severe("CRITICAL: Error creating or updating player_data table: " + e.getMessage());
-            getServer().getPluginManager().disablePlugin(this);
-        }
-    }
-
-    private void releaseOrphanedLocks() {
-        String escapedTableName = "`" + tableName + "`";
-        String releaseSQL = "UPDATE " + escapedTableName
-                + " SET is_locked = 0, locking_server = NULL, lock_timestamp = 0 WHERE locking_server = ?";
-
-        try (Connection connection = databaseManager.getConnection();
-                PreparedStatement statement = connection.prepareStatement(releaseSQL)) {
-
-            statement.setString(1, this.serverId);
-            int affectedRows = statement.executeUpdate();
-
-            if (affectedRows > 0) {
-                getLogger()
-                        .info("Released " + affectedRows + " orphaned player data locks for server: " + this.serverId);
-            } else {
-                getLogger().info("No orphaned player data locks found for server: " + this.serverId);
-            }
-        } catch (Exception e) {
-            getLogger().severe("CRITICAL: Could not release player data locks for " + this.serverId + "! Error: "
-                    + e.getMessage());
-        }
-    }
-
-    public boolean isDebugMode() {
-        return debugMode;
-    }
-
-    public String getServerId() {
-        return serverId;
-    }
-
-    public int getLockHeartbeatSeconds() {
-        return getConfig().getInt("lock-heartbeat-seconds", 30);
-    }
-
-    public boolean isSyncEnabled(String key) {
-        return getConfig().getBoolean("sync-data." + key, true); // Default to true for safety
-    }
-
-    public boolean isSyncEnabledNewFeature(String key) {
-        return getConfig().getBoolean("sync-data." + key, false); // Default to false for new features
-    }
-
-    public boolean isServerBlacklisted(String serverName) {
-        return getConfig().getStringList("sync-blacklist.servers").contains(serverName);
-    }
-
-    public boolean isWorldBlacklisted(String worldName) {
-        return getConfig().getStringList("sync-blacklist.worlds").contains(worldName);
-    }
-
-    private void updateConfig() {
-        // Simple append-based updater to preserve comments in existing file
-        java.io.File configFile = new java.io.File(getDataFolder(), "config.yml");
-        if (!configFile.exists())
-            return;
-
-        // Load strictly from file to check valid keys without defaults interference
-        org.bukkit.configuration.file.YamlConfiguration fileConfig = org.bukkit.configuration.file.YamlConfiguration
-                .loadConfiguration(configFile);
-
-        StringBuilder newConfigContent = new StringBuilder();
-        boolean updated = false;
-
-        // Check for 'debug'
-        if (!fileConfig.contains("debug")) {
-            newConfigContent.append("\n");
-            newConfigContent.append("# Enable debug mode for verbose logging.\n");
-            newConfigContent.append("debug: false\n");
-            updated = true;
-        }
-
-        // Check for 'server-id'
-        if (!fileConfig.contains("server-id")) {
-            newConfigContent.append("\n");
-            newConfigContent.append("# Unique identifier for this server (Required).\n");
-            newConfigContent.append("server-id: \"default-server\"\n");
-            updated = true;
-        }
-
-        // Check for 'table-prefix'
-        if (!fileConfig.contains("table-prefix")) {
-            newConfigContent.append("\n");
-            newConfigContent.append("# Set to prefix the player_data table (e.g., 'hmt_sync_').\n");
-            newConfigContent.append("table-prefix: \"\"\n");
-            updated = true;
-        }
-
-        // Check for 'database' section
-        if (!fileConfig.contains("database")) {
-            newConfigContent.append("\n");
-            newConfigContent.append("database:\n");
-            newConfigContent.append("  host: \"localhost\"\n");
-            newConfigContent.append("  port: 3306\n");
-            newConfigContent.append("  name: \"minecraft\"\n");
-            newConfigContent.append("  username: \"root\"\n");
-            newConfigContent.append("  password: \"password\"\n");
-            newConfigContent.append("  useSSL: false\n");
-            newConfigContent.append("  connection-timeout: 30000\n");
-            newConfigContent.append("  idle-timeout: 600000\n");
-            newConfigContent.append("  max-lifetime: 1800000\n");
-            updated = true;
-        }
-
-        // Check for 'lock-timeout'
-        if (!fileConfig.contains("lock-timeout")) {
-            newConfigContent.append("\n");
-            newConfigContent
-                    .append("# The duration in milliseconds after which a player data lock is considered expired.\n");
-            newConfigContent.append("# Default: 60000 (1 minute)\n");
-            newConfigContent.append("lock-timeout: 60000\n");
-            updated = true;
-        }
-
-        // Check if lock-heartbeat-seconds exists
-        if (!fileConfig.contains("lock-heartbeat-seconds")) {
-            newConfigContent.append("\n");
-            newConfigContent
-                    .append("# The interval in seconds between lock updates (heartbeats) while a player is online.\n");
-            newConfigContent.append("# Default: 30\n");
-            newConfigContent.append("lock-heartbeat-seconds: 30\n");
-            updated = true;
-        }
-
-        // Check for 'auto-update-schema'
-        if (!fileConfig.contains("auto-update-schema")) {
-            newConfigContent.append("\n");
-            newConfigContent
-                    .append("# Automatically migrate 'data' column from LONGTEXT to MEDIUMBLOB for performance?\n");
-            newConfigContent.append("# WARNING: This causes an ALTER TABLE which might lock the table briefly.\n");
-            newConfigContent.append("auto-update-schema: true\n");
-            updated = true;
-        }
-
-        // Check if sync-data exists
-        if (!fileConfig.contains("sync-data")) {
-            newConfigContent.append("\n");
-            newConfigContent.append("# Granular Data Synchronization Toggles\n");
-            newConfigContent.append("# Enable or disable synchronization for specific data components.\n");
-            newConfigContent.append("sync-data:\n");
-            newConfigContent.append("  health: true\n");
-            newConfigContent.append("  food-level: true\n");
-            newConfigContent.append("  experience: true\n");
-            newConfigContent.append("  inventory: true\n");
-            newConfigContent.append("  armor: true\n");
-            newConfigContent.append("  potion-effects: true\n");
-            newConfigContent.append("  ender-chest: false\n");
-            newConfigContent.append("  location: false\n");
-            newConfigContent.append("  advancements: false\n");
-            updated = true;
-        }
-
-        // Check if sync-blacklist exists
-        if (!fileConfig.contains("sync-blacklist")) {
-            newConfigContent.append("\n");
-            newConfigContent.append("# Server/World Blacklist\n");
-            newConfigContent.append(
-                    "# Data synchronization will be disabled for players on these servers or in these worlds.\n");
-            newConfigContent.append("sync-blacklist:\n");
-            newConfigContent.append("  servers:\n");
-            newConfigContent.append("    - \"example-blacklisted-server\"\n");
-            newConfigContent.append("  worlds:\n");
-            newConfigContent.append("    - \"example_world_nether\"\n");
-            updated = true;
-        }
-
-        if (updated) {
-            try (java.io.FileWriter writer = new java.io.FileWriter(configFile, true)) {
-                writer.write(newConfigContent.toString());
-                getLogger().info("Automatically updated config.yml with new settings.");
-            } catch (java.io.IOException e) {
-                getLogger().severe("Failed to update config.yml: " + e.getMessage());
-            }
-            reloadConfig(); // Reload the config so internal logic sees the new values
-        }
-    }
-
-    public static Gson getGson() {
-        return GSON;
-    }
-
-    public EconomyManager getEconomyManager() {
-        return economyManager;
-    }
-
-    public PlaytimeManager getPlaytimeManager() {
-        return playtimeManager;
+        getLogger().info("hmt-sync has been disabled!");
     }
 
     /**
-     * Initialize Redis connection if enabled in config
+     * Initialize the Redis connection used by the hybrid caching strategy.
+     * Only {@code redis.storage-strategy: redis-mysql-hybrid} activates it; every other
+     * value keeps the authoritative store purely on the SQL side.
      */
     private void initializeRedis() {
         if (!getConfig().getBoolean("redis.enabled", false)) {
@@ -448,27 +222,712 @@ public class HMTSync extends JavaPlugin {
 
         if (redisEnabled) {
             getLogger().info("[HMTSync-Redis] Successfully initialized Redis connection");
-            // Enable hybrid mode in database manager
             databaseManager.enableHybridMode(redisManager);
-            databaseManager.setLogger(getLogger());
         } else {
-            getLogger()
-                    .warning("[HMTSync-Redis] Failed to initialize Redis connection, falling back to MySQL-only mode");
+            getLogger().warning("[HMTSync-Redis] Failed to initialize Redis connection, "
+                    + "falling back to SQL-only persistence");
             redisEnabled = false;
         }
     }
 
-    /**
-     * Get Redis manager instance
-     */
+    public EconomyManager getEconomyManager() {
+        return economyManager;
+    }
+
+    public PlaytimeManager getPlaytimeManager() {
+        return playtimeManager;
+    }
+
     public RedisManager getRedisManager() {
         return redisManager;
     }
 
-    /**
-     * Check if Redis is enabled and available
-     */
     public boolean isRedisEnabled() {
         return redisEnabled && redisManager != null && redisManager.isAvailable();
+    }
+
+    private void createServerTable() {
+        if (!tableName.matches("\\w+")) {
+            throw new SecurityException("Invalid table name: " + tableName);
+        }
+        String escapedTableName = "`" + tableName + "`";
+        String dbType = getConfig().getString("database.type", "mysql").toLowerCase();
+
+        try (Connection connection = databaseManager.getConnection();
+                Statement statement = connection.createStatement()) {
+
+            migrateFromLegacyTable(connection, statement, escapedTableName);
+
+            String createTableSQL = getCreateTableSQL(dbType, escapedTableName);
+            statement.executeUpdate(createTableSQL);
+            getLogger().log(java.util.logging.Level.INFO, "Successfully verified or created the {0} table.", tableName);
+
+            ensureColumnExists(connection, statement, escapedTableName, dbType, "is_locked", "BOOLEAN DEFAULT 0",
+                    INTEGER_DEFAULT_0);
+            ensureColumnExists(connection, statement, escapedTableName, dbType, "locking_server",
+                    "VARCHAR(255) DEFAULT NULL", TEXT_DEFAULT_NULL);
+            ensureColumnExists(connection, statement, escapedTableName, dbType, "lock_timestamp", BIGINT_DEFAULT_0,
+                    INTEGER_DEFAULT_0);
+            ensureColumnExists(connection, statement, escapedTableName, dbType, "lock_version", BIGINT_DEFAULT_0,
+                    INTEGER_DEFAULT_0);
+            ensureColumnExists(connection, statement, escapedTableName, dbType, "snapshot_checksum", VARCHAR64_DEFAULT_NULL,
+                    TEXT_DEFAULT_NULL);
+            ensureColumnExists(connection, statement, escapedTableName, dbType, "last_known_name",
+                    "VARCHAR(16) DEFAULT NULL", TEXT_DEFAULT_NULL);
+
+            ensureColumnExists(connection, statement, escapedTableName, dbType, "data_checksum", VARCHAR64_DEFAULT_NULL,
+                    TEXT_DEFAULT_NULL);
+            ensureColumnExists(connection, statement, escapedTableName, dbType, "identity_hash", VARCHAR64_DEFAULT_NULL,
+                    TEXT_DEFAULT_NULL);
+            ensureColumnExists(connection, statement, escapedTableName, dbType, "name_last_updated", BIGINT_DEFAULT_0,
+                    INTEGER_DEFAULT_0);
+            ensureColumnExists(connection, statement, escapedTableName, dbType, "last_updated",
+                    "TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP",
+                    "DATETIME DEFAULT CURRENT_TIMESTAMP");
+
+            migrateDataColumn(connection, statement, escapedTableName, dbType);
+
+            // Create component tables for normalized schema
+            String tablePrefix = getConfig().getString(CONFIG_TABLE_PREFIX, "");
+            String escapedInventories = "`" + tablePrefix + "hmt_sync_inventories`";
+            String escapedStatistics = "`" + tablePrefix + "hmt_sync_statistics`";
+            String escapedMetadata = "`" + tablePrefix + "hmt_sync_metadata`";
+            String escapedCompanions = "`" + tablePrefix + "hmt_sync_companions`";
+            String escapedMaps = "`" + tablePrefix + "hmt_sync_maps`";
+            String escapedGamemodeInventories = "`" + tablePrefix + "hmt_sync_gamemode_inventories`";
+
+            if (dbType.equals(SQLITE)) {
+                statement.executeUpdate(CREATE_TABLE_IF_NOT_EXISTS + escapedInventories + " (" +
+                        "uuid TEXT PRIMARY KEY, " +
+                        "inventory_blob TEXT, " +
+                        "armor_blob TEXT, " +
+                        "ender_chest_blob TEXT, " +
+                        "last_updated DATETIME DEFAULT CURRENT_TIMESTAMP);");
+                statement.executeUpdate(CREATE_TABLE_IF_NOT_EXISTS + escapedStatistics + " (" +
+                        "uuid TEXT PRIMARY KEY, " +
+                        "health REAL DEFAULT 20.0, " +
+                        "food_level INTEGER DEFAULT 20, " +
+                        "xp_level INTEGER DEFAULT 0, " +
+                        "xp_exp REAL DEFAULT 0.0, " +
+                        "xp_total INTEGER DEFAULT 0, " +
+                        "saturation REAL DEFAULT 5.0, " +
+                        "exhaustion REAL DEFAULT 0.0, " +
+                        "vanilla_stats_json TEXT DEFAULT NULL, " +
+                        "last_updated DATETIME DEFAULT CURRENT_TIMESTAMP);");
+                statement.executeUpdate(CREATE_TABLE_IF_NOT_EXISTS + escapedMetadata + " (" +
+                        "uuid TEXT PRIMARY KEY, " +
+                        "pdc_data TEXT DEFAULT NULL, " +
+                        "advancements TEXT DEFAULT NULL, " +
+                        "last_updated DATETIME DEFAULT CURRENT_TIMESTAMP);");
+                statement.executeUpdate(CREATE_TABLE_IF_NOT_EXISTS + escapedCompanions + " (" +
+                        "uuid TEXT PRIMARY KEY, " +
+                        "companions_nbt TEXT DEFAULT NULL, " +
+                        "last_updated DATETIME DEFAULT CURRENT_TIMESTAMP);");
+                statement.executeUpdate(CREATE_TABLE_IF_NOT_EXISTS + escapedMaps + " (" +
+                        "uuid TEXT PRIMARY KEY, " +
+                        "maps_nbt TEXT DEFAULT NULL, " +
+                        "last_updated DATETIME DEFAULT CURRENT_TIMESTAMP);");
+                statement.executeUpdate(CREATE_TABLE_IF_NOT_EXISTS + escapedGamemodeInventories + " (" +
+                        "uuid TEXT NOT NULL, " +
+                        "gamemode TEXT NOT NULL, " +
+                        "inventory_blob TEXT, " +
+                        "armor_blob TEXT, " +
+                        "ender_chest_blob TEXT, " +
+                        "last_updated DATETIME DEFAULT CURRENT_TIMESTAMP, " +
+                        "PRIMARY KEY (uuid, gamemode));");
+            } else {
+                statement.executeUpdate(CREATE_TABLE_IF_NOT_EXISTS + escapedInventories + " (" +
+                        "uuid VARCHAR(36) NOT NULL, " +
+                        "inventory_blob LONGBLOB DEFAULT NULL, " +
+                        "armor_blob LONGBLOB DEFAULT NULL, " +
+                        "ender_chest_blob LONGBLOB DEFAULT NULL, " +
+                        "last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, " +
+                        "PRIMARY KEY (uuid)) ENGINE=InnoDB;");
+                statement.executeUpdate(CREATE_TABLE_IF_NOT_EXISTS + escapedStatistics + " (" +
+                        "uuid VARCHAR(36) NOT NULL, " +
+                        "health DOUBLE DEFAULT 20.0, " +
+                        "food_level INT DEFAULT 20, " +
+                        "xp_level INT DEFAULT 0, " +
+                        "xp_exp FLOAT DEFAULT 0.0, " +
+                        "xp_total INT DEFAULT 0, " +
+                        "saturation FLOAT DEFAULT 5.0, " +
+                        "exhaustion FLOAT DEFAULT 0.0, " +
+                        "vanilla_stats_json LONGTEXT DEFAULT NULL, " +
+                        "last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, " +
+                        "PRIMARY KEY (uuid)) ENGINE=InnoDB;");
+                statement.executeUpdate(CREATE_TABLE_IF_NOT_EXISTS + escapedMetadata + " (" +
+                        "uuid VARCHAR(36) NOT NULL, " +
+                        "pdc_data LONGTEXT DEFAULT NULL, " +
+                        "advancements LONGTEXT DEFAULT NULL, " +
+                        "last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, " +
+                        "PRIMARY KEY (uuid)) ENGINE=InnoDB;");
+                statement.executeUpdate(CREATE_TABLE_IF_NOT_EXISTS + escapedCompanions + " (" +
+                        "uuid VARCHAR(36) NOT NULL, " +
+                        "companions_nbt LONGTEXT DEFAULT NULL, " +
+                        "last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, " +
+                        "PRIMARY KEY (uuid)) ENGINE=InnoDB;");
+                statement.executeUpdate(CREATE_TABLE_IF_NOT_EXISTS + escapedMaps + " (" +
+                        "uuid VARCHAR(36) NOT NULL, " +
+                        "maps_nbt LONGTEXT DEFAULT NULL, " +
+                        "last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, " +
+                        "PRIMARY KEY (uuid)) ENGINE=InnoDB;");
+                statement.executeUpdate(CREATE_TABLE_IF_NOT_EXISTS + escapedGamemodeInventories + " (" +
+                        "uuid VARCHAR(36) NOT NULL, " +
+                        "gamemode VARCHAR(16) NOT NULL, " +
+                        "inventory_blob LONGBLOB DEFAULT NULL, " +
+                        "armor_blob LONGBLOB DEFAULT NULL, " +
+                        "ender_chest_blob LONGBLOB DEFAULT NULL, " +
+                        "last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, " +
+                        "PRIMARY KEY (uuid, gamemode)) ENGINE=InnoDB;");
+            }
+
+            migrateStatisticsColumn(connection, statement, dbType);
+
+        } catch (Exception e) {
+            getLogger().log(java.util.logging.Level.SEVERE,
+                    "CRITICAL: Error creating or updating player_data table: {0}", e.getMessage());
+            getServer().getPluginManager().disablePlugin(this);
+        }
+    }
+
+    private String getCreateTableSQL(String dbType, String escapedTableName) {
+        if (dbType.equals(SQLITE)) {
+            return CREATE_TABLE_IF_NOT_EXISTS + escapedTableName + " (" +
+                    "uuid TEXT PRIMARY KEY, " +
+                    "data BLOB, " +
+                    "is_locked INTEGER DEFAULT 0, " +
+                    "locking_server TEXT DEFAULT NULL, " +
+                    "lock_timestamp INTEGER DEFAULT 0, " +
+                    "lock_version INTEGER DEFAULT 0, " +
+                    "snapshot_checksum TEXT DEFAULT NULL, " +
+                    "last_known_name TEXT DEFAULT NULL, " +
+                    "data_checksum TEXT DEFAULT NULL, " +
+                    "identity_hash TEXT DEFAULT NULL, " +
+                    "name_last_updated INTEGER DEFAULT 0, " +
+                    "last_updated DATETIME DEFAULT CURRENT_TIMESTAMP);";
+        } else {
+            return CREATE_TABLE_IF_NOT_EXISTS + escapedTableName + " (" +
+                    "uuid VARCHAR(36) NOT NULL, " +
+                    "data LONGBLOB, " +
+                    "is_locked BOOLEAN DEFAULT 0, " +
+                    "locking_server VARCHAR(255) DEFAULT NULL, " +
+                    "lock_timestamp BIGINT DEFAULT 0, " +
+                    "lock_version BIGINT DEFAULT 0, " +
+                    "snapshot_checksum VARCHAR(64) DEFAULT NULL, " +
+                    "last_known_name VARCHAR(16) DEFAULT NULL, " +
+                    "data_checksum VARCHAR(64) DEFAULT NULL, " +
+                    "identity_hash VARCHAR(64) DEFAULT NULL, " +
+                    "name_last_updated BIGINT DEFAULT 0, " +
+                    "last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, " +
+                    "PRIMARY KEY (uuid)) ENGINE=InnoDB;";
+        }
+    }
+
+
+    private void migrateFromLegacyTable(Connection connection, Statement statement, String escapedTableName)
+            throws SQLException {
+        if (!tableName.equals(DEFAULT_TABLE_NAME)) {
+            try {
+                ResultSet oldTable = connection.getMetaData().getTables(null, null, DEFAULT_TABLE_NAME, null);
+                boolean oldExists = oldTable.next();
+                oldTable.close();
+
+                ResultSet newTable = connection.getMetaData().getTables(null, null, tableName, null);
+                boolean newExists = newTable.next();
+                newTable.close();
+
+                if (oldExists && !newExists) {
+                    getLogger().warning("Detected old 'player_data' table and new prefix setting. Migrating...");
+                    statement.executeUpdate("RENAME TABLE `" + DEFAULT_TABLE_NAME + "` TO " + escapedTableName);
+                    getLogger().info("Migration successful!");
+                }
+            } catch (Exception e) {
+                getLogger().log(java.util.logging.Level.SEVERE, "Failed to migrate table: {0}", e.getMessage());
+            }
+        }
+    }
+
+    private void ensureColumnExists(Connection connection, Statement statement, String escapedTableName, String dbType,
+            String column, String mysqlType, String sqliteType) throws SQLException {
+        java.util.Map.Entry<String, String> allowedTypes = COLUMN_WHITELIST.get(column);
+        if (allowedTypes == null) {
+            throw new SecurityException("Blocked attempt to add un-whitelisted column: " + column);
+        }
+        if (!allowedTypes.getKey().equals(mysqlType) || !allowedTypes.getValue().equals(sqliteType)) {
+            throw new SecurityException("Blocked attempt to add column " + column + " with un-whitelisted types.");
+        }
+
+        if (!connection.getMetaData().getColumns(null, null, tableName, column).next()) {
+            String type = dbType.equals(SQLITE) ? sqliteType : mysqlType;
+            statement.executeUpdate(ALTER_TABLE_SQL + escapedTableName + " ADD COLUMN " + column + " " + type);
+        }
+    }
+
+    private void migrateDataColumn(Connection connection, Statement statement, String escapedTableName, String dbType)
+            throws SQLException {
+        try (ResultSet columns = connection.getMetaData().getColumns(null, null, tableName, "data")) {
+            if (columns.next()) {
+                String typeName = columns.getString("TYPE_NAME");
+                boolean needsMigration = "LONGTEXT".equalsIgnoreCase(typeName) || "TEXT".equalsIgnoreCase(typeName);
+
+                if (needsMigration) {
+                    if (getConfig().getBoolean(AUTO_UPDATE_SCHEMA, false)) {
+                        if (dbType.equals(SQLITE))
+                            return;
+                        getLogger().log(java.util.logging.Level.INFO,
+                                "Migrating 'data' column from {0} to LONGBLOB as requested...", typeName);
+                        statement.executeUpdate(
+                                ALTER_TABLE_SQL + escapedTableName + " MODIFY COLUMN data LONGBLOB NULL");
+                    } else {
+                        getLogger().warning(BANNER);
+                        getLogger().log(java.util.logging.Level.WARNING,
+                                "!!! YOUR DATABASE IS USING {0} FOR 'data' COLUMN. !!!", typeName);
+                        getLogger().warning("!!! IT IS RECOMMENDED TO SWITCH TO 'LONGBLOB' !!!");
+                        getLogger().warning("!!! ENABLE 'auto-update-schema: true' IN CONFIG TO FIX AUTOMATICALLY !!!");
+                        getLogger().warning(BANNER);
+                    }
+                }
+
+                if ("NO".equalsIgnoreCase(columns.getString("IS_NULLABLE"))) {
+                    statement.executeUpdate(ALTER_TABLE_SQL + escapedTableName + " MODIFY COLUMN data LONGBLOB NULL");
+                }
+            }
+        }
+    }
+
+    private void migrateStatisticsColumn(Connection connection, Statement statement, String dbType)
+            throws SQLException {
+        if (dbType.equals(SQLITE)) {
+            return;
+        }
+        String tablePrefix = getConfig().getString(CONFIG_TABLE_PREFIX, "");
+        String statisticsTable = tablePrefix + "hmt_sync_statistics";
+        String escapedStatistics = "`" + statisticsTable + "`";
+
+        try (ResultSet columns = connection.getMetaData().getColumns(null, null, statisticsTable,
+                "vanilla_stats_json")) {
+            if (columns.next()) {
+                String typeName = columns.getString("TYPE_NAME");
+                if ("TEXT".equalsIgnoreCase(typeName)) {
+                    if (getConfig().getBoolean(AUTO_UPDATE_SCHEMA, false)) {
+                        getLogger().log(java.util.logging.Level.INFO,
+                                "Migrating 'vanilla_stats_json' column in {0} from TEXT to LONGTEXT...",
+                                statisticsTable);
+                        statement.executeUpdate(ALTER_TABLE_SQL + escapedStatistics
+                                + " MODIFY COLUMN vanilla_stats_json LONGTEXT DEFAULT NULL");
+                    } else {
+                        getLogger().warning(BANNER);
+                        getLogger().log(java.util.logging.Level.WARNING,
+                                "!!! STATISTICS TABLE IS USING {0} FOR 'vanilla_stats_json' COLUMN. !!!", typeName);
+                        getLogger().warning(
+                                "!!! IT IS HIGHLY RECOMMENDED TO SWITCH TO 'LONGTEXT' TO PREVENT DATA TRUNCATION ERRORS. !!!");
+                        getLogger().warning(
+                                "!!! ENABLE 'auto-update-schema: true' IN CONFIG TO FIX AUTOMATICALLY, OR RUN: !!!");
+                        getLogger().log(java.util.logging.Level.WARNING,
+                                "!!! ALTER TABLE {0} MODIFY COLUMN vanilla_stats_json LONGTEXT DEFAULT NULL; !!!",
+                                escapedStatistics);
+                        getLogger().warning(BANNER);
+                    }
+                }
+            }
+        }
+    }
+
+    private void releaseOrphanedLocks() {
+        String escapedTableName = "`" + tableName + "`";
+        String releaseSQL = "UPDATE " + escapedTableName
+                + " SET is_locked = 0, locking_server = NULL, lock_timestamp = 0 WHERE locking_server = ?";
+
+        try (Connection connection = databaseManager.getConnection();
+                PreparedStatement statement = connection.prepareStatement(releaseSQL)) {
+
+            statement.setString(1, this.serverId);
+            int affectedRows = statement.executeUpdate();
+
+            if (affectedRows > 0) {
+                getLogger().log(java.util.logging.Level.INFO, "Released {0} orphaned player data locks for server: {1}",
+                        new Object[] { affectedRows, this.serverId });
+            } else {
+                getLogger().log(java.util.logging.Level.INFO, "No orphaned player data locks found for server: {0}",
+                        this.serverId);
+            }
+        } catch (Exception e) {
+            getLogger().log(java.util.logging.Level.SEVERE,
+                    "CRITICAL: Could not release player data locks for {0}! Error: {1}",
+                    new Object[] { this.serverId, e.getMessage() });
+        }
+    }
+
+    public boolean isDebugMode() {
+        return debugMode;
+    }
+
+    public String getServerId() {
+        return serverId;
+    }
+
+    public int getLockHeartbeatSeconds() {
+        return getConfig().getInt("lock-heartbeat-seconds", 30);
+    }
+
+    public String getSecuritySeed() {
+        return securitySeed;
+    }
+
+    public String getIdentityMode() {
+        return identityMode;
+    }
+
+    public PlayerListener getPlayerListener() {
+        return playerListener;
+    }
+
+    public boolean isAutoMigrateFastLogin() {
+        return autoMigrateFastLogin;
+    }
+
+    public boolean isAutoMigrateAuthMe() {
+        return autoMigrateAuthMe;
+    }
+
+    public boolean isSyncEnabled(String key) {
+        return getConfig().getBoolean(SYNC_DATA_PREFIX + key, true); // Default to true for safety
+    }
+
+    public boolean isSyncEnabledNewFeature(String key) {
+        return getConfig().getBoolean(SYNC_DATA_PREFIX + key, false); // Default to false for new features
+    }
+
+    public boolean isServerBlacklisted(String serverName) {
+        return getConfig().getStringList("sync-blacklist.servers").contains(serverName);
+    }
+
+    public boolean isWorldBlacklisted(String worldName) {
+        return getConfig().getStringList("sync-blacklist.worlds").contains(worldName);
+    }
+
+    private void updateConfig() {
+        java.io.File configFile = new java.io.File(getDataFolder(), "config.yml");
+        if (!configFile.exists()) {
+            saveDefaultConfig();
+            return;
+        }
+
+        org.bukkit.configuration.file.YamlConfiguration fileConfig = org.bukkit.configuration.file.YamlConfiguration
+                .loadConfiguration(configFile);
+
+        java.util.List<String> cleanLines = reconstructCleanConfig(fileConfig);
+        try {
+            java.nio.file.Files.write(configFile.toPath(), cleanLines, java.nio.charset.StandardCharsets.UTF_8);
+            getLogger().info("Successfully restructured and updated config.yml.");
+            reloadConfig();
+        } catch (java.io.IOException e) {
+            getLogger().severe("Failed to save updated config.yml: " + e.getMessage());
+        }
+    }
+
+    private java.util.List<String> reconstructCleanConfig(org.bukkit.configuration.file.YamlConfiguration fileConfig) {
+        java.util.List<String> lines = new java.util.ArrayList<>();
+
+        // 1. Database Configuration
+        lines.add("# Database Configuration");
+        lines.add("database:");
+        lines.add("  # Connection type: \"mysql\" (for MySQL/MariaDB) or \"sqlite\" (local file)");
+        lines.add("  type: " + fileConfig.getString("database.type", "mysql"));
+        lines.add("  host: " + fileConfig.getString("database.host", "localhost"));
+        lines.add("  port: " + fileConfig.getInt("database.port", 3306));
+        lines.add("  database: " + fileConfig.getString("database.database", "minecraft"));
+        lines.add("  username: " + fileConfig.getString("database.username", "user"));
+        lines.add("  password: " + fileConfig.getString("database.password", "password"));
+        lines.add("");
+        lines.add("  # If type is \"sqlite\", specify the filename here.");
+        lines.add("  sqlite-file: \"" + fileConfig.getString("database.sqlite-file", "player_data.db") + "\"");
+        lines.add("");
+        lines.add("  # Data serialization format: \"json\" or \"binary\"");
+        lines.add("  # - json: Human-readable Base64-encoded NBT JSON (default, compatible with older versions)");
+        lines.add("  # - binary: Compressed NBT byte array (native LONGBLOB/BLOB). Recommended for production");
+        lines.add("  #           to reduce database size and serialization time.");
+        lines.add("  serialization-format: \"" + fileConfig.getString("database.serialization-format", "json") + "\"");
+        lines.add("");
+
+        boolean backupsEnabled = fileConfig.getBoolean("backups.enabled", fileConfig.getBoolean("database.backups.enabled", false));
+        int backupsInterval = fileConfig.getInt("backups.interval-hours", fileConfig.getInt("database.backups.interval-hours", 24));
+        int backupsMax = fileConfig.getInt("backups.max-backups", fileConfig.getInt("database.backups.max-backups", 7));
+        String backupsPath = fileConfig.getString("backups.path", fileConfig.getString("database.backups.path", "backups/"));
+
+        lines.add("  # Redundancy System (JSON Exports)");
+        lines.add("  # WARNING: This simply copies database contents to the local filesystem.");
+        lines.add("  # This is NOT a true backup if stored on the same machine/container.");
+        lines.add("  # It is disabled by default to avoid misleading administrators.");
+        lines.add("  backups:");
+        lines.add("    enabled: " + backupsEnabled);
+        lines.add("    interval-hours: " + backupsInterval);
+        lines.add("    max-backups: " + backupsMax);
+        lines.add("    path: \"" + backupsPath + "\"");
+        lines.add("");
+        lines.add("  # =========================================================================");
+        lines.add("  # TRUE OFFSITE BACKUPS (RECOMMENDED)");
+        lines.add("  # =========================================================================");
+        lines.add("  # For production servers, we STRONGLY recommend using external database");
+        lines.add("  # management tools rather than the internal redundancy system above.");
+        lines.add("  #");
+        lines.add("  # Example (Linux/MySQL):");
+        lines.add("  #   mysqldump -u [user] -p[password] [database] [table] > backup.sql");
+        lines.add("  #");
+        lines.add("  # Best Practices:");
+        lines.add("  # 1. Automate: Use a cron job to run backups daily.");
+        lines.add("  # 2. Offsite: Use 'rclone' or 'aws s3 cp' to move the .sql file to cloud storage.");
+        lines.add("  # 3. Isolation: NEVER store true backups in the Minecraft server directory.");
+        lines.add("  # 4. Managed: Consider using AWS RDS, Google CloudSQL, or DigitalOcean Managed");
+        lines.add("  #    Databases for automatic point-in-time recovery.");
+        lines.add("  # =========================================================================");
+        lines.add("");
+        lines.add("  # A list of JDBC properties to apply.");
+        lines.add("  # These are recommended, but you can change/add/remove as needed.");
+        lines.add("  properties:");
+        lines.add("    useSSL: " + fileConfig.getBoolean("database.properties.useSSL", false));
+        lines.add("    allowPublicKeyRetrieval: " + fileConfig.getBoolean("database.properties.allowPublicKeyRetrieval", true));
+        lines.add("");
+        lines.add("  # HikariCP Connection Pool Settings");
+        lines.add("  # These settings are optimized for resilience and performance.");
+        lines.add("  # It is recommended to leave these at their default values unless you are an experienced administrator.");
+        lines.add("  pool-settings:");
+        lines.add("    maximum-pool-size: " + fileConfig.getInt("database.pool-settings.maximum-pool-size", 10));
+        lines.add("    minimum-idle: " + fileConfig.getInt("database.pool-settings.minimum-idle", 10));
+        lines.add("    max-lifetime: " + fileConfig.getInt("database.pool-settings.max-lifetime", 1800000));
+        lines.add("    connection-timeout: " + fileConfig.getInt("database.pool-settings.connection-timeout", 5000));
+        lines.add("    idle-timeout: " + fileConfig.getInt("database.pool-settings.idle-timeout", 600000));
+        lines.add("");
+        lines.add("  # MySQL JDBC Optimizations");
+        lines.add("  # These are advanced settings for the MySQL driver.");
+        lines.add("  # Do not change these unless you know what you are doing.");
+        lines.add("  optimizations:");
+        lines.add("    cache-prep-stmts: " + fileConfig.getBoolean("database.optimizations.cache-prep-stmts", true));
+        lines.add("    prep-stmt-cache-size: " + fileConfig.getInt("database.optimizations.prep-stmt-cache-size", 250));
+        lines.add("    prep-stmt-cache-sql-limit: " + fileConfig.getInt("database.optimizations.prep-stmt-cache-sql-limit", 2048));
+        lines.add("    use-server-prep-stmts: " + fileConfig.getBoolean("database.optimizations.use-server-prep-stmts", true));
+        lines.add("    use-local-session-state: " + fileConfig.getBoolean("database.optimizations.use-local-session-state", true));
+        lines.add("    rewrite-batched-statements: " + fileConfig.getBoolean("database.optimizations.rewrite-batched-statements", true));
+        lines.add("    cache-result-set-metadata: " + fileConfig.getBoolean("database.optimizations.cache-result-set-metadata", true));
+        lines.add("    cache-server-configuration: " + fileConfig.getBoolean("database.optimizations.cache-server-configuration", true));
+        lines.add("    elide-set-auto-commits: " + fileConfig.getBoolean("database.optimizations.elide-set-auto-commits", true));
+        lines.add("    maintain-time-stats: " + fileConfig.getBoolean("database.optimizations.maintain-time-stats", false));
+        lines.add("");
+
+        // 2. Root Primitives
+        lines.add("# Set to true to enable verbose debugging messages in the server console.");
+        lines.add("# This can be useful for diagnosing issues, but should be false for normal operation.");
+        lines.add("debug: " + fileConfig.getBoolean("debug", false));
+        lines.add("");
+        lines.add("# A unique name for this server. This is CRITICAL for data locking.");
+        lines.add("# Each server connected to the same database MUST have a unique name.");
+        lines.add("# Example: \"survival-1\", \"creative\", \"lobby\"");
+        lines.add("server-id: \"" + fileConfig.getString("server-id", "default-server") + "\"");
+        lines.add("");
+        lines.add("# Set to prefix the player_data table (e.g., 'mc_data_bridge_').");
+        lines.add("table-prefix: \"" + fileConfig.getString("table-prefix", "") + "\"");
+        lines.add("");
+        lines.add("# The duration in milliseconds after which a player data lock is considered expired.");
+        lines.add("# This prevents players from being permanently locked out if a server crashes.");
+        lines.add("# Default: 60000 (1 minute)");
+        lines.add("lock-timeout: " + fileConfig.getInt("lock-timeout", 60000));
+        lines.add("");
+        lines.add("# The interval in seconds between lock updates (heartbeats) while a player is online.");
+        lines.add("# Default: 30");
+        lines.add("lock-heartbeat-seconds: " + fileConfig.getInt("lock-heartbeat-seconds", 30));
+        lines.add("");
+        lines.add("# Automatically migrate 'data' column from LONGTEXT to MEDIUMBLOB for performance?");
+        lines.add("# WARNING: This causes an ALTER TABLE which might lock the table briefly.");
+        lines.add("auto-update-schema: " + fileConfig.getBoolean("auto-update-schema", true));
+        lines.add("");
+
+        // 3. Legacy Map Mode Migration
+        boolean mapSyncValue = fileConfig.getBoolean("sync-data.maps", false);
+        boolean mapLockValue = fileConfig.getBoolean("maps.lock-global-maps", false);
+        if (fileConfig.contains("maps.mode") && !fileConfig.contains("maps.lock-global-maps")) {
+            String legacyMode = fileConfig.getString("maps.mode", "vanilla");
+            if ("global".equalsIgnoreCase(legacyMode) || "locked".equalsIgnoreCase(legacyMode)) {
+                mapSyncValue = true;
+                mapLockValue = true;
+            } else if ("unlocked".equalsIgnoreCase(legacyMode) || "vanilla".equalsIgnoreCase(legacyMode)) {
+                mapSyncValue = true;
+                mapLockValue = false;
+            } else if ("disabled".equalsIgnoreCase(legacyMode) || "false".equalsIgnoreCase(legacyMode) || "none".equalsIgnoreCase(legacyMode)) {
+                mapSyncValue = false;
+                mapLockValue = true;
+            } else {
+                mapSyncValue = false;
+                mapLockValue = false;
+            }
+        }
+
+        // 4. Sync Data Toggles
+        lines.add("# Granular Data Synchronization Toggles");
+        lines.add("# Enable or disable synchronization for specific data components.");
+        lines.add("sync-data:");
+        lines.add("  health: " + fileConfig.getBoolean("sync-data.health", true));
+        lines.add("  food-level: " + fileConfig.getBoolean("sync-data.food-level", true));
+        lines.add("  experience: " + fileConfig.getBoolean("sync-data.experience", true));
+        lines.add("  inventory: " + fileConfig.getBoolean("sync-data.inventory", true));
+        lines.add("  armor: " + fileConfig.getBoolean("sync-data.armor", true));
+        lines.add("  potion-effects: " + fileConfig.getBoolean("sync-data.potion-effects", true));
+        lines.add("  ender-chest: " + fileConfig.getBoolean("sync-data.ender-chest", false));
+        lines.add("  location: " + fileConfig.getBoolean("sync-data.location", false));
+        lines.add("  advancements: " + fileConfig.getBoolean("sync-data.advancements", false));
+        lines.add("  statistics: " + fileConfig.getBoolean("sync-data.statistics", false));
+        lines.add("  pdc: " + fileConfig.getBoolean("sync-data.pdc", false));
+        lines.add("  flight-gamemode: " + fileConfig.getBoolean("sync-data.flight-gamemode", false));
+        lines.add("  companions: " + fileConfig.getBoolean("sync-data.companions", false));
+        lines.add("  maps: " + mapSyncValue);
+        lines.add("  separate-gamemode-inventories: " + fileConfig.getBoolean("sync-data.separate-gamemode-inventories", false));
+        lines.add("  economy: " + fileConfig.getBoolean("sync-data.economy", false));
+        lines.add("  playtime: " + fileConfig.getBoolean("sync-data.playtime", false));
+        lines.add("");
+        lines.add("# Third-Party Plugin Bridges");
+        lines.add("# Both bridges are opt-in and need the backing plugin installed on every server.");
+        lines.add("# economy:  Vault + an economy provider. The synced balance is authoritative and overwritten on join.");
+        lines.add("# playtime: EssentialsX. Cumulative counter, only ever raised on join, never lowered.");
+        lines.add("");
+
+        // 5. Maps Settings
+        lines.add("# Map Synchronization Settings");
+        lines.add("# To enable cross-server map synchronization, set 'sync-data.maps: true' above.");
+        lines.add("maps:");
+        lines.add("  # Force Map Locking on Synced Maps");
+        lines.add("  # - true: Forces globally synchronized map views to be locked (locked = 1).");
+        lines.add("  #   This prevents destination servers (e.g. Resource) from re-scanning local terrain and overwriting custom artwork");
+        lines.add("  #   or applying a Fog of War exploration grid over synchronized maps.");
+        lines.add("  # - false (default - vanilla style): Preserves vanilla unlocked map behavior where Paper's map engine");
+        lines.add("  #   re-scans and overwrites map pixels based on nearby terrain on the current server.");
+        lines.add("  # Default: false");
+        lines.add("  lock-global-maps: " + mapLockValue);
+        lines.add("");
+
+        // 6. Redis Hybrid Cache
+        lines.add("# Redis Hybrid Cache (optional)");
+        lines.add("# Mirrors the player payload in Redis so a server hop can skip an immediate SQL read.");
+        lines.add("# CACHE ONLY: locking, the lock_version fencing token and durable writes stay on SQL,");
+        lines.add("# because a best-effort Redis key cannot reject stale saves from a frozen server.");
+        lines.add("redis:");
+        lines.add("  # Only contacted when this is true AND storage-strategy is \"redis-mysql-hybrid\".");
+        lines.add("  enabled: " + fileConfig.getBoolean("redis.enabled", false));
+        lines.add("  host: " + fileConfig.getString("redis.host", "localhost"));
+        lines.add("  port: " + fileConfig.getInt("redis.port", 6379));
+        lines.add("  # Leave empty if the server requires no password.");
+        lines.add("  password: \"" + fileConfig.getString("redis.password", "") + "\"");
+        lines.add("  # Socket/connect timeout in milliseconds.");
+        lines.add("  timeout-ms: " + fileConfig.getInt("redis.timeout-ms", 2000));
+        lines.add("  # Keep this comfortably below lock-timeout.");
+        lines.add("  cache-duration-seconds: " + fileConfig.getInt("redis.cache-duration-seconds", 300));
+        lines.add("  # mysql-only (default, safest) or redis-mysql-hybrid.");
+        lines.add("  storage-strategy: \"" + fileConfig.getString("redis.storage-strategy", "mysql-only") + "\"");
+        lines.add("");
+
+        // 7. Server/World Blacklist
+        lines.add("# Server/World Blacklist");
+        lines.add("# Data synchronization will be disabled for players on these servers or in these worlds.");
+        lines.add("sync-blacklist:");
+        lines.add("  servers:");
+        java.util.List<String> servers = fileConfig.getStringList("sync-blacklist.servers");
+        if (servers.isEmpty()) servers = java.util.List.of("example-blacklisted-server");
+        for (String s : servers) {
+            lines.add("    - \"" + s + "\"");
+        }
+        lines.add("  worlds:");
+        java.util.List<String> worlds = fileConfig.getStringList("sync-blacklist.worlds");
+        if (worlds.isEmpty()) worlds = java.util.List.of("example_world_nether");
+        for (String w : worlds) {
+            lines.add("    - \"" + w + "\"");
+        }
+        lines.add("");
+
+        // 8. Security Settings
+        String seed = fileConfig.getString("security.seed", fileConfig.getString("identity.seed", DEFAULT_SEED));
+        lines.add("# Security Settings");
+        lines.add("security:");
+        lines.add("  # Log a warning if a player joins with a different UUID than previously recorded for that name.");
+        lines.add("  # This helps identify potential identity switches or \"cracked-to-premium\" transitions.");
+        lines.add("  log-uuid-mismatches: " + fileConfig.getBoolean("security.log-uuid-mismatches", true));
+        lines.add("  ");
+        lines.add("  # Verify SHA-256 checksums of player data before loading.");
+        lines.add("  # This prevents data manipulation or corruption from being synced.");
+        lines.add("  verify-data-integrity: " + fileConfig.getBoolean("security.verify-data-integrity", true));
+        lines.add("");
+        lines.add("  # A secret seed used to salt all cryptographic hashes (Identity Hash and Checksums).");
+        lines.add("  # CHANGE THIS to a long, random string to secure your network.");
+        lines.add("  # WARNING: If you change this later, existing identity hashes will be updated on next join,");
+        lines.add("  # but data integrity checks will fall back to legacy mode until the data is re-saved.");
+        lines.add("  seed: \"" + seed + "\"");
+        lines.add("");
+
+        // 9. Identity & Migration Settings
+        lines.add("# Identity & Migration Settings");
+        lines.add("identity:");
+        lines.add("  # PREMIUM: UUID for a name should NEVER change. Collisions require manual /migrate.");
+        lines.add("  # HYBRID: Allows flexible identity shifts (useful for Cracked -> Premium transitions).");
+        lines.add("  mode: " + fileConfig.getString("identity.mode", "PREMIUM"));
+        lines.add("");
+        lines.add("  # If true, and FastLogin is installed, the plugin will attempt to ");
+        lines.add("  # auto-migrate data if FastLogin confirms the player is a verified premium user.");
+        lines.add("  auto-migrate-fastlogin: " + fileConfig.getBoolean("identity.auto-migrate-fastlogin", false));
+        lines.add("");
+        lines.add("  # If true, and AuthMe is installed, the plugin will attempt to ");
+        lines.add("  # auto-migrate data once the player successfully logs in via AuthMe.");
+        lines.add("  auto-migrate-authme: " + fileConfig.getBoolean("identity.auto-migrate-authme", false));
+        lines.add("");
+
+        // 10. Companion / Pet Settings
+        lines.add("# Companion / Pet Settings");
+        lines.add("companions:");
+        lines.add("  # The search radius (blocks) around the player to locate tamed pets/companions for transfer.");
+        lines.add("  # Default: 32");
+        lines.add("  scan-radius: " + fileConfig.getInt("companions.scan-radius", 32));
+        lines.add("  # Companion synchronization mode:");
+        lines.add("  # - follow: Companions follow the player across different servers.");
+        lines.add("  # - return: Companions stay on the server they were left on and reappear when the player returns.");
+        lines.add("  # - untracked: Companions are not managed or synchronized by the plugin.");
+        lines.add("  # Default: follow");
+        String compMode = fileConfig.getString("companions.mode", "follow");
+        lines.add("  mode: \"" + compMode + "\"");
+        lines.add("");
+
+        // 11. Prometheus Metrics Exporter
+        lines.add("# Prometheus Metrics Exporter");
+        lines.add("metrics:");
+        lines.add("  # Enable or disable the Prometheus metrics exporter.");
+        lines.add("  # If enabled, an embedded HTTP server will start at the specified port and path.");
+        lines.add("  enabled: " + fileConfig.getBoolean("metrics.enabled", false));
+        lines.add("  ");
+        lines.add("  # The port on which the metrics server will listen.");
+        lines.add("  port: " + fileConfig.getInt("metrics.port", 8080));
+        lines.add("  ");
+        lines.add("  # The HTTP endpoint path for scraping metrics.");
+        lines.add("  path: \"" + fileConfig.getString("metrics.path", "/metrics") + "\"");
+        lines.add("");
+
+        // 12. Redundancy System (Backups)
+        lines.add("# Redundancy System (JSON Exports)");
+        lines.add("# This is NOT a true backup if stored on the same machine/container.");
+        lines.add("backups:");
+        lines.add("  enabled: " + backupsEnabled);
+        lines.add("  interval-hours: " + backupsInterval);
+        lines.add("  max-backups: " + backupsMax);
+        lines.add("  path: \"" + backupsPath + "\"");
+
+        return lines;
+    }
+
+    private void saveUpdatedConfig(java.io.File configFile, java.util.List<String> lines) {
+        try {
+            java.nio.file.Files.write(configFile.toPath(), lines, java.nio.charset.StandardCharsets.UTF_8);
+            getLogger().info("Successfully updated config.yml with missing settings.");
+            reloadConfig();
+        } catch (java.io.IOException e) {
+            getLogger().severe("Failed to write updated config.yml: " + e.getMessage());
+        }
+    }
+
+    public static Gson getGson() {
+        return GSON;
     }
 }

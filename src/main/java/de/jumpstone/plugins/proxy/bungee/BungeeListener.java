@@ -2,7 +2,6 @@ package de.jumpstone.plugins.proxy.bungee;
 
 import com.google.common.io.ByteArrayDataOutput;
 import com.google.common.io.ByteStreams;
-import de.jumpstone.plugins.managers.RedisManager;
 import net.md_5.bungee.api.connection.ProxiedPlayer;
 import net.md_5.bungee.api.event.ServerSwitchEvent;
 import net.md_5.bungee.api.plugin.Listener;
@@ -21,30 +20,10 @@ public class BungeeListener implements Listener {
     public void onServerSwitch(ServerSwitchEvent event) {
         ProxiedPlayer player = event.getPlayer();
         if (event.getFrom() != null) {
-            String playerName = player.getName();
-            String fromServer = event.getFrom().getName();
-
-            plugin.getLogger().info("Player " + playerName + " is switching from " + fromServer
-                    + ". Handling data transfer...");
-
-            // If Redis is enabled, cache player data immediately
-            if (plugin instanceof BungeeHMTSync && ((BungeeHMTSync) plugin).isRedisEnabled()) {
-                RedisManager redisManager = ((BungeeHMTSync) plugin).getRedisManager();
-                if (redisManager != null && redisManager.isAvailable()) {
-                    // Send immediate cache request to source server
-                    ByteArrayDataOutput cacheOut = ByteStreams.newDataOutput();
-                    cacheOut.writeUTF("CachePlayerData");
-                    cacheOut.writeUTF(player.getUniqueId().toString());
-                    event.getFrom().sendData("hmt-sync:main", cacheOut.toByteArray());
-
-                    plugin.getLogger().info("[HMTSync-Redis] Cached player data for " + playerName + " in Redis");
-                }
-            }
-
-            // Send traditional SaveAndRelease request
+            plugin.getLogger().info("Player " + player.getName() + " is switching from " + event.getFrom().getName() + ". Requesting data save.");
             ByteArrayDataOutput out = ByteStreams.newDataOutput();
             out.writeUTF("SaveAndRelease");
-            out.writeUTF(player.getUniqueId().toString());
+            out.writeUTF(java.util.Objects.requireNonNull(player.getUniqueId().toString(), "UUID string cannot be null"));
             event.getFrom().sendData("hmt-sync:main", out.toByteArray());
         }
     }

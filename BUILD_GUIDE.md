@@ -10,7 +10,7 @@ This guide explains how to build the HMT Sync plugin for different Minecraft ser
 mvn clean package -Pspigot
 ```
 
-This creates: `target/hmt-sync-2.1.1-SNAPSHOT-spigot.jar`
+This creates: `target/hmt-sync-2.2.3-spigot.jar`
 
 **Use this JAR for:**
 - Spigot servers
@@ -23,7 +23,7 @@ This creates: `target/hmt-sync-2.1.1-SNAPSHOT-spigot.jar`
 mvn clean package -Pvelocity
 ```
 
-This creates: `target/hmt-sync-2.1.1-SNAPSHOT-velocity.jar`
+This creates: `target/hmt-sync-2.2.3-velocity.jar`
 
 **Use this JAR for:**
 - Velocity proxy servers
@@ -34,7 +34,7 @@ This creates: `target/hmt-sync-2.1.1-SNAPSHOT-velocity.jar`
 mvn clean package -Pbungee
 ```
 
-This creates: `target/hmt-sync-2.1.1-SNAPSHOT-bungee.jar`
+This creates: `target/hmt-sync-2.2.3-bungee.jar`
 
 **Use this JAR for:**
 - BungeeCord proxy servers
@@ -46,7 +46,7 @@ This creates: `target/hmt-sync-2.1.1-SNAPSHOT-bungee.jar`
 mvn clean package -Puniversal
 ```
 
-This creates: `target/hmt-sync-2.1.1-SNAPSHOT-universal.jar`
+This creates: `target/hmt-sync-2.2.3-universal.jar`
 
 **Warning:** This JAR contains all metadata files and should only be used for development/testing. It may cause conflicts on production servers.
 
@@ -98,3 +98,40 @@ The hybrid approach requires different metadata files because:
 - **Velocity** uses annotation-based plugin definition (no YAML file needed)
 
 Each platform's loader checks for its specific metadata format, which is why mixing them causes loading errors.
+
+## Requirements
+
+- **JDK 25** (the `maven.compiler.release` target is 25; older JDKs cannot build this project)
+- **Maven 3.9+**
+
+## Test Fixtures
+
+### MockMC registry data
+
+Most tests boot a full mock Bukkit server through
+[`MockMC`](https://github.com/SecondLifeGaming/mockmc). MockMC ships its registry
+data inside its own JAR, generated against Paper 26.2, while this plugin targets
+Paper 26.3. Every registry entry that 26.3 added is therefore missing, and the
+first static initialiser that asks for one (`ItemType`, `BlockType`, `Sound`,
+`Biome`, ...) throws `NoSuchElementException`, which cascades into every
+MockMC-backed test erroring out.
+
+`src/test/resources/keyed/*.json` are 26.3-complete copies of those files. MockMC
+reads them with `getResourceAsStream("/keyed/<id>.json")`, so the test resources
+shadow the copies inside the dependency JAR. They are generated, not hand-edited:
+
+```bash
+python3 scripts/gen_mockmc_26_3_registry.py
+```
+
+The script reads the real `paper-api` 26.2 and 26.3 JARs, diffs the enum
+constants, and for each new key clones the most similar existing entry and
+retargets every self-reference inside it (key, `translationKey`, `typed`,
+`material`, `blockType`, `item_model`, …). Sound keys are not derivable from the
+constant name (`BLOCK_STRAW_BED_BREAK_LEAVE` is
+`minecraft:block.straw_bed.break_leave`), so they are read straight out of the
+`Sound` class's `<clinit>`, where each key is a literal next to its `putstatic`.
+
+**Regenerate these whenever the Paper version in `pom.xml` changes.** If a Paper
+upgrade adds registry content the fixtures do not cover, the affected tests will
+fail with `No value for minecraft:<key>`; rerun the script and commit the result.

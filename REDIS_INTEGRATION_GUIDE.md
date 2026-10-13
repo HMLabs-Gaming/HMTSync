@@ -8,15 +8,22 @@ This implementation adds Redis caching support to the HMT Sync plugin to elimina
 ### 1. Redis Manager Class
 - **File**: `src/main/java/de/jumpstone/plugins/managers/RedisManager.java`
 - Handles all Redis operations with connection pooling
-- Provides atomic locking operations for player data
-- Supports data caching with configurable TTL
+- Caches committed player payloads with a configurable TTL
+- Queues pending-save records for auditing
 - Graceful error handling and fallback mechanisms
+
+> **Redis is not used for locking.** `RedisManager` still exposes
+> `acquireLock`/`releaseLock` helpers, but nothing calls them: their
+> check-then-set sequence is not atomic and cannot provide the fencing
+> guarantee the save path depends on. All locking and fencing is handled by
+> `DatabaseManager` against SQL, using the monotonic `lock_version` column.
 
 ### 2. Hybrid Database Support
 - **Modified**: `src/main/java/de/jumpstone/plugins/managers/DatabaseManager.java`
 - Added hybrid mode that uses Redis for caching and MySQL for persistence
 - Automatic fallback to MySQL when Redis is unavailable
-- Enhanced lock management with Redis-first approach
+- **SQL stays authoritative.** Redis only mirrors payloads that have already
+  been committed, so a cache hit is never newer than the row it mirrors
 
 ### 3. Proxy Integration
 - **Modified**: 
@@ -60,16 +67,19 @@ SMP checks MySQL lock → Still locked → KICK
 ```
 Player switches Lobby → SMP
 ↓
-Proxy caches player data in Redis INSTANTLY (<1ms)
+Proxy caches player data in Redis (<1ms)
 ↓
-Proxy sends SaveAndRelease to Lobby (background)
+SMP acquires the SQL lock  ← still the authoritative gate
+   └─ lock still held by Lobby → KICK, unchanged
 ↓
-Player connects to SMP
+SMP reads the payload: Redis cache if present, otherwise MySQL
 ↓
-SMP checks Redis cache → Data available → ALLOW
-↓
-Background: Lobby saves to MySQL for persistence
+Background: Lobby commits to MySQL, then re-publishes to the cache
 ```
+
+Note that Redis does not shorten the lock wait. A player whose data is still
+being saved is still refused entry; what Redis removes is the *read* round trip
+once the lock has been won, not the write fencing.
 
 ## Configuration Setup
 

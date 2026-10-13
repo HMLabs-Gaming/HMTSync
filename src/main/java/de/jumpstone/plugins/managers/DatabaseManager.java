@@ -1,30 +1,91 @@
 package de.jumpstone.plugins.managers;
 
+import de.jumpstone.plugins.utils.HashUtils;
+import de.jumpstone.plugins.utils.PlayerData;
+import de.jumpstone.plugins.utils.PlayerData.CompanionSnapshot;
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import org.bukkit.configuration.file.FileConfiguration;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.Base64;
+import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.logging.Logger;
 
+@SuppressWarnings("java:S2077") // Dynamic SQL concatenation is required for configurable table prefixes; inputs are sanitized during plugin initialization.
 public class DatabaseManager {
+
+    private static final Logger LOGGER = Logger.getLogger("hmt-sync");
+    private static final String UPDATE_SQL_PREFIX = "UPDATE ";
+    private static final String INSERT_INTO_SQL = "INSERT INTO ";
+    private static final String SQL_SELECT_PREFIX = "SELECT ";
+    private static final String SQL_FROM = " FROM ";
+    private static final String WHERE_UUID_SQL = " WHERE uuid = ?";
+    private static final String MIGRATE_UUID_SQL = " SET uuid = ? WHERE uuid = ?";
+    private static final String COL_HEALTH = "health";
+    private static final String COL_ADVANCEMENTS = "advancements";
+    private static final String MODE_FOLLOW = "follow";
+    private static final String MODE_RETURN = "return";
+    private static final String MODE_UNTRACKED = "untracked";
+    private static final String GAMEMODE_SURVIVAL = "SURVIVAL";
+    private static final String COL_INVENTORY_BLOB = "inventory_blob";
+    private static final String COL_ARMOR_BLOB = "armor_blob";
+    private static final String COL_ENDER_CHEST_BLOB = "ender_chest_blob";
+    private static final Gson GSON = new GsonBuilder().create();
 
     private final HikariDataSource dataSource;
     private final long lockTimeout;
     private final String tableName;
+    private final String currentTimeFunction;
+
+    private final String tablePrefix;
+    private final String inventoriesTable;
+    private final String statisticsTable;
+    private final String metadataTable;
+    private final String companionsTable;
+    private final String mapsTable;
+    private final String gamemodeInventoriesTable;
+    private final String serializationFormat;
+    private final boolean isSQLite;
+
     private RedisManager redisManager;
-    private boolean hybridMode = false;
-    private Logger logger;
+    private boolean hybridMode;
+    private Logger logger = LOGGER;
 
     public DatabaseManager(FileConfiguration config, String tableName) {
         this.tableName = "`" + tableName.replace("`", "") + "`"; // Escape table name
+        this.tablePrefix = config.getString("table-prefix", "").replace("`", "");
+        this.inventoriesTable = "`" + this.tablePrefix + "hmt_sync_inventories`";
+        this.statisticsTable = "`" + this.tablePrefix + "hmt_sync_statistics`";
+        this.metadataTable = "`" + this.tablePrefix + "hmt_sync_metadata`";
+        this.companionsTable = "`" + this.tablePrefix + "hmt_sync_companions`";
+        this.mapsTable = "`" + this.tablePrefix + "hmt_sync_maps`";
+        this.gamemodeInventoriesTable = "`" + this.tablePrefix + "hmt_sync_gamemode_inventories`";
+        this.serializationFormat = config.getString("database.serialization-format", "json").toLowerCase();
+
         HikariConfig hikariConfig = new HikariConfig();
 
-        String jdbcUrl = "jdbc:mysql://" + config.getString("database.host") + ":" + config.getInt("database.port")
-                + "/" + config.getString("database.database");
+        String type = config.getString("database.type", "mysql").toLowerCase();
+        String jdbcUrl;
+
+        if (type.equals("sqlite")) {
+            String fileName = config.getString("database.sqlite-file", "player_data.db");
+            jdbcUrl = "jdbc:sqlite:" + fileName;
+            hikariConfig.setDriverClassName("org.sqlite.JDBC");
+        } else {
+            jdbcUrl = "jdbc:mysql://" + config.getString("database.host") + ":" + config.getInt("database.port")
+                    + "/" + config.getString("database.database");
+            // mysql-connector-j is the default for MySQL/MariaDB in this project
+        }
+
         hikariConfig.setJdbcUrl(jdbcUrl);
         hikariConfig.setUsername(config.getString("database.username"));
         hikariConfig.setPassword(config.getString("database.password"));
@@ -49,9 +110,14 @@ public class DatabaseManager {
             }
         }
 
+        this.isSQLite = type.equals("sqlite");
         this.dataSource = new HikariDataSource(hikariConfig);
         this.lockTimeout = config.getLong("lock-timeout", 60000); // 60 seconds default
-        this.logger = java.util.logging.Logger.getLogger("HMTSync");
+        if (this.isSQLite) {
+            this.currentTimeFunction = "(strftime('%s','now') * 1000)";
+        } else {
+            this.currentTimeFunction = "(UNIX_TIMESTAMP() * 1000)";
+        }
     }
 
     /**
@@ -62,6 +128,30 @@ public class DatabaseManager {
         this.dataSource = dataSource;
         this.tableName = "`" + tableName.replace("`", "") + "`";
         this.lockTimeout = lockTimeout;
+        this.currentTimeFunction = "(UNIX_TIMESTAMP() * 1000)"; // Default for tests
+        this.tablePrefix = "";
+        this.inventoriesTable = "`hmt_sync_inventories`";
+        this.statisticsTable = "`hmt_sync_statistics`";
+        this.metadataTable = "`hmt_sync_metadata`";
+        this.companionsTable = "`hmt_sync_companions`";
+        this.mapsTable = "`hmt_sync_maps`";
+        this.gamemodeInventoriesTable = "`hmt_sync_gamemode_inventories`";
+        this.serializationFormat = "json";
+        this.isSQLite = false;
+    }
+
+    public int getActiveConnections() {
+        if (dataSource != null && dataSource.getHikariPoolMXBean() != null) {
+            return dataSource.getHikariPoolMXBean().getActiveConnections();
+        }
+        return 0;
+    }
+
+    public int getPendingThreads() {
+        if (dataSource != null && dataSource.getHikariPoolMXBean() != null) {
+            return dataSource.getHikariPoolMXBean().getThreadsAwaitingConnection();
+        }
+        return 0;
     }
 
     public Connection getConnection() throws SQLException {
@@ -74,156 +164,53 @@ public class DatabaseManager {
         }
     }
 
-    public boolean acquireLock(UUID uuid, String serverId) throws SQLException {
-        long currentTime = System.currentTimeMillis();
-        long expirationTime = currentTime - lockTimeout;
+    // ---------------------------------------------------------------------
+    // Hybrid Redis cache layer.
+    //
+    // Lock acquisition deliberately stays on the SQL side: the engine relies on
+    // the monotonic lock_version fencing token to reject stale saves, and a
+    // best-effort Redis key cannot provide that guarantee. Redis is therefore
+    // used only to cache the serialized player payload so a joining server can
+    // skip the authoritative read, and to queue pending-save notifications.
+    // The SQL row always remains the source of truth.
+    // ---------------------------------------------------------------------
 
-        try (Connection connection = getConnection()) {
-            PreparedStatement updateStmt = connection.prepareStatement(
-                    "UPDATE " + tableName
-                            + " SET is_locked = 1, locking_server = ?, lock_timestamp = ? WHERE uuid = ? AND (is_locked = 0 OR is_locked IS NULL OR lock_timestamp < ?)");
-            updateStmt.setString(1, serverId);
-            updateStmt.setLong(2, currentTime);
-            updateStmt.setString(3, uuid.toString());
-            updateStmt.setLong(4, expirationTime);
-
-            if (updateStmt.executeUpdate() > 0) {
-                return true; // Lock acquired on existing row
-            }
-
-            try {
-                PreparedStatement insertStmt = connection.prepareStatement(
-                        "INSERT INTO " + tableName
-                                + " (uuid, data, is_locked, locking_server, lock_timestamp) VALUES (?, NULL, 1, ?, ?)");
-                insertStmt.setString(1, uuid.toString());
-                insertStmt.setString(2, serverId);
-                insertStmt.setLong(3, currentTime);
-                insertStmt.executeUpdate();
-                return true; // Lock acquired via new row
-            } catch (SQLException e) {
-                // This is expected if a race condition occurred and another server inserted the
-                // row first.
-            }
-
-            return false;
-        }
-    }
-
-    public boolean saveAndReleaseLock(String json, UUID uuid, String serverId) throws SQLException {
-        String sql = "UPDATE " + tableName
-                + " SET data = ?, is_locked = 0, locking_server = NULL, lock_timestamp = 0 WHERE uuid = ? AND locking_server = ?";
-        try (Connection connection = getConnection();
-                PreparedStatement statement = connection.prepareStatement(sql)) {
-            statement.setBytes(1, json.getBytes(java.nio.charset.StandardCharsets.UTF_8));
-            statement.setString(2, uuid.toString());
-            statement.setString(3, serverId);
-            return statement.executeUpdate() > 0;
-        }
-    }
-
-    public void releaseLock(UUID uuid, String serverId) {
-        if (serverId == null || serverId.isEmpty()) {
-            System.err.println(
-                    "[hmt-sync] CRITICAL: releaseLock was called with a null or empty serverId for UUID: "
-                            + uuid);
-            return;
-        }
-
-        String sql = "UPDATE " + tableName
-                + " SET is_locked = 0, locking_server = NULL, lock_timestamp = 0 WHERE uuid = ? AND locking_server = ?";
-        try (Connection connection = getConnection();
-                PreparedStatement releaseStatement = connection.prepareStatement(sql)) {
-            releaseStatement.setString(1, uuid.toString());
-            releaseStatement.setString(2, serverId);
-            releaseStatement.executeUpdate();
-        } catch (Exception e) {
-            System.err.println("[hmt-sync] Failed to release lock for " + uuid + " on server " + serverId + ": "
-                    + e.getMessage());
-        }
-    }
-
-    /**
-     * Forcefully releases the lock for a player, regardless of which server holds
-     * it.
-     * Used by the admin unlock command.
-     */
-    public boolean releaseLock(UUID uuid) {
-        String sql = "UPDATE " + tableName
-                + " SET is_locked = 0, locking_server = NULL, lock_timestamp = 0 WHERE uuid = ?";
-        try (Connection connection = getConnection();
-                PreparedStatement statement = connection.prepareStatement(sql)) {
-            statement.setString(1, uuid.toString());
-            int rows = statement.executeUpdate();
-            return rows > 0; // Return true if a row was actually updated (lock released or at least row
-                             // touched)
-        } catch (SQLException e) {
-            System.err.println("[hmt-sync] Failed to force release lock for " + uuid + ": " + e.getMessage());
-            return false;
-        }
-    }
-
-    public void updateLock(UUID uuid, String serverId) {
-        long currentTime = System.currentTimeMillis();
-        String sql = "UPDATE " + tableName + " SET lock_timestamp = ? WHERE uuid = ? AND locking_server = ?";
-        try (Connection connection = getConnection();
-                PreparedStatement statement = connection.prepareStatement(sql)) {
-            statement.setLong(1, currentTime);
-            statement.setString(2, uuid.toString());
-            statement.setString(3, serverId);
-            statement.executeUpdate();
-        } catch (SQLException e) {
-            System.err.println("[hmt-sync] Failed to update lock for " + uuid + ": " + e.getMessage());
-        }
-    }
-
-    public String getTableName() {
-        return tableName;
-    }
-
-    /**
-     * Enable hybrid Redis-MySQL mode
-     */
     public void enableHybridMode(RedisManager redisManager) {
         this.redisManager = redisManager;
         this.hybridMode = redisManager != null && redisManager.isAvailable();
-        if (hybridMode && logger != null) {
-            logger.info("[HMTSync] Hybrid Redis-MySQL mode enabled");
+        if (hybridMode) {
+            logger.info("[HMTSync] Hybrid Redis-SQL cache enabled (SQL remains authoritative for locks)");
         }
     }
 
-    /**
-     * Set logger for hybrid mode operations
-     */
     public void setLogger(Logger logger) {
-        this.logger = logger;
+        if (logger != null) {
+            this.logger = logger;
+        }
     }
 
-    /**
-     * Check if hybrid mode is active
-     */
     public boolean isHybridMode() {
         return hybridMode && redisManager != null && redisManager.isAvailable();
     }
 
-    /**
-     * Get Redis manager instance
-     */
     public RedisManager getRedisManager() {
         return redisManager;
     }
 
     /**
-     * Store player data in Redis cache (hybrid mode)
+     * Mirror a freshly written player payload into the Redis cache so the next
+     * server in the chain can pick it up without an immediate SQL read.
      */
     public boolean cachePlayerData(UUID uuid, String jsonData, int cacheSeconds) {
-        if (!isHybridMode()) {
+        if (!isHybridMode() || jsonData == null) {
             return false;
         }
         return redisManager.storePlayerData(uuid, jsonData, cacheSeconds);
     }
 
     /**
-     * Retrieve player data from Redis cache (hybrid mode)
+     * Fetch the cached payload for a player, or {@code null} when absent.
+     * Callers must still be able to fall back to the SQL load path.
      */
     public String getCachedPlayerData(UUID uuid) {
         if (!isHybridMode()) {
@@ -232,9 +219,6 @@ public class DatabaseManager {
         return redisManager.getPlayerData(uuid);
     }
 
-    /**
-     * Check if player data exists in Redis cache
-     */
     public boolean hasCachedPlayerData(UUID uuid) {
         if (!isHybridMode()) {
             return false;
@@ -243,54 +227,1281 @@ public class DatabaseManager {
     }
 
     /**
-     * Hybrid acquire lock - tries Redis first, falls back to MySQL
+     * Drop a cached payload, used once a server has loaded the authoritative row.
      */
-    public boolean acquireLockHybrid(UUID uuid, String serverId, int ttlSeconds) throws SQLException {
-        if (isHybridMode()) {
-            // Try Redis lock first (much faster)
-            if (redisManager.acquireLock(uuid, serverId, ttlSeconds)) {
-                if (logger != null) {
-                    logger.info("[HMTSync-Hybrid] Lock acquired in Redis for " + uuid + " by " + serverId);
+    public boolean invalidateCachedPlayerData(UUID uuid) {
+        if (!isHybridMode()) {
+            return false;
+        }
+        return redisManager.deletePlayerData(uuid);
+    }
+
+    /**
+     * Record that a server has flushed a payload, so proxies/operators can audit
+     * saves that were only served from cache.
+     */
+    public boolean queuePendingSave(UUID uuid, String sourceServer) {
+        if (!isHybridMode()) {
+            return false;
+        }
+        return redisManager.addToPendingSaves(uuid, sourceServer);
+    }
+
+    public String getHybridStats() {
+        if (!isHybridMode()) {
+            return "Hybrid cache: DISABLED";
+        }
+        return "Hybrid cache: ENABLED | " + redisManager.getStats();
+    }
+
+    public boolean acquireLock(UUID uuid, String serverId) throws SQLException {
+        long startTime = System.currentTimeMillis();
+        try {
+            return acquireLockInternal(uuid, serverId);
+        } finally {
+            long duration = System.currentTimeMillis() - startTime;
+            MetricsManager.getInstance().recordLockAcquisitionLatency(duration);
+        }
+    }
+
+    public long acquireLockVersion(UUID uuid, String serverId) throws SQLException {
+        try (Connection connection = getConnection()) {
+            return fetchLockVersion(connection, uuid, serverId);
+        }
+    }
+
+    private boolean acquireLockInternal(UUID uuid, String serverId) throws SQLException {
+        try (Connection connection = getConnection()) {
+            String updateSql = UPDATE_SQL_PREFIX + tableName
+                    + " SET is_locked = 1, locking_server = ?, lock_timestamp = " + currentTimeFunction
+                    + ", lock_version = lock_version + 1"
+                    + " WHERE uuid = ? AND (is_locked = 0 OR is_locked IS NULL OR lock_timestamp < " + currentTimeFunction + " - ?)";
+
+            try (PreparedStatement updateStmt = connection.prepareStatement(updateSql)) {
+                updateStmt.setString(1, serverId);
+                updateStmt.setString(2, uuid.toString());
+                updateStmt.setLong(3, lockTimeout);
+
+                if (updateStmt.executeUpdate() > 0) {
+                    return true;
+                }
+            }
+
+            try {
+                String insertSql = INSERT_INTO_SQL + tableName
+                        + " (uuid, data, is_locked, locking_server, lock_timestamp, lock_version) VALUES (?, NULL, 1, ?, " + currentTimeFunction + ", 1)";
+                try (PreparedStatement insertStmt = connection.prepareStatement(insertSql)) {
+                    insertStmt.setString(1, uuid.toString());
+                    insertStmt.setString(2, serverId);
+                    return insertStmt.executeUpdate() > 0;
+                }
+            } catch (SQLException _) {
+                try (PreparedStatement retryUpdateStmt = connection.prepareStatement(updateSql)) {
+                    retryUpdateStmt.setString(1, serverId);
+                    retryUpdateStmt.setString(2, uuid.toString());
+                    retryUpdateStmt.setLong(3, lockTimeout);
+                    return retryUpdateStmt.executeUpdate() > 0;
+                }
+            }
+        }
+    }
+
+
+    private long fetchLockVersion(Connection connection, UUID uuid, String serverId) {
+        String sql = "SELECT lock_version FROM " + tableName + " WHERE uuid = ? AND locking_server = ? AND is_locked = 1";
+        try (PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setString(1, uuid.toString());
+            stmt.setString(2, serverId);
+            try (ResultSet rs = stmt.executeQuery()) {
+                if (rs != null && rs.next()) {
+                    long ver = rs.getLong("lock_version");
+                    return ver > 0 ? ver : 1L;
+                }
+            }
+        } catch (Exception _) {
+            // Fallback for mock environments
+        }
+        return 1L;
+    }
+
+
+    public boolean saveAndReleaseLockComponents(de.jumpstone.plugins.HMTSync plugin, PlayerData data, String name, UUID uuid, String serverId, String seed) throws SQLException {
+        long lockVersion = (data != null) ? data.getLockVersion() : 0L;
+        String snapshotChecksum = (data != null) ? data.calculateSnapshotChecksum(seed) : null;
+
+        try (Connection connection = getConnection()) {
+            connection.setAutoCommit(false);
+            try {
+                if (data != null) {
+                    savePlayerDataComponentsInternal(connection, plugin, data, uuid);
+                }
+
+                StringBuilder sqlBuilder = new StringBuilder(UPDATE_SQL_PREFIX)
+                        .append(tableName)
+                        .append(" SET data = NULL, data_checksum = NULL, snapshot_checksum = ?, last_known_name = ?, identity_hash = ?, name_last_updated = ?, is_locked = 0, locking_server = NULL, lock_timestamp = 0 WHERE uuid = ? AND locking_server = ?");
+
+                // ARCHITECTURAL INVARIANT: lock_version is a monotonic fencing token, not merely a version number.
+                // Once ownership advances to a newer token (epoch), all database operations carrying an older token
+                // MUST be permanently rejected (0 rows updated) to prevent stale server post-GC writes from corrupting state.
+                if (lockVersion > 0) {
+                    sqlBuilder.append(" AND lock_version = ?");
+                }
+
+                try (PreparedStatement statement = connection.prepareStatement(sqlBuilder.toString())) {
+                    statement.setString(1, snapshotChecksum);
+                    statement.setString(2, name);
+                    statement.setString(3, HashUtils.generateIdentityHash(name, uuid, seed));
+                    statement.setLong(4, System.currentTimeMillis());
+                    statement.setString(5, uuid.toString());
+                    statement.setString(6, serverId);
+                    if (lockVersion > 0) {
+                        statement.setLong(7, lockVersion);
+                    }
+
+                    int updated = statement.executeUpdate();
+                    if (updated > 0) {
+                        connection.commit();
+                        return true;
+                    } else {
+                        connection.rollback();
+                        LOGGER.log(java.util.logging.Level.WARNING, "Save/Release lock failed for {0}: lock version {1} stale or lock stolen by another server.", new Object[]{uuid, lockVersion});
+                        return false;
+                    }
+                }
+            } catch (SQLException e) {
+                connection.rollback();
+                throw e;
+            } finally {
+                connection.setAutoCommit(true);
+            }
+        }
+    }
+
+    public boolean saveAndReleaseLock(String json, String checksum, String name, UUID uuid, String serverId, String seed) throws SQLException {
+        String sql = UPDATE_SQL_PREFIX + tableName
+                + " SET data = ?, data_checksum = ?, last_known_name = ?, identity_hash = ?, name_last_updated = ?, is_locked = 0, locking_server = NULL, lock_timestamp = 0 WHERE uuid = ? AND locking_server = ?";
+        try (Connection connection = getConnection();
+                PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setBytes(1, json.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            statement.setString(2, checksum);
+            statement.setString(3, name);
+            statement.setString(4, HashUtils.generateIdentityHash(name, uuid, seed));
+            statement.setLong(5, System.currentTimeMillis());
+            statement.setString(6, uuid.toString());
+            statement.setString(7, serverId);
+            return statement.executeUpdate() > 0;
+        }
+    }
+
+    public boolean saveAndReleaseLock(String json, String checksum, String name, UUID uuid, String serverId) throws SQLException {
+        return saveAndReleaseLock(json, checksum, name, uuid, serverId, null);
+    }
+
+    public boolean saveAndReleaseLock(String json, UUID uuid, String serverId) throws SQLException {
+        return saveAndReleaseLock(json, null, null, uuid, serverId);
+    }
+
+    public void releaseLock(UUID uuid, String serverId, long lockVersion) {
+        if (serverId == null || serverId.isEmpty()) {
+            LOGGER.log(java.util.logging.Level.SEVERE, "CRITICAL: releaseLock was called with a null or empty serverId for UUID: {0}", uuid);
+            return;
+        }
+        if (lockVersion <= 0) {
+            releaseLock(uuid, serverId);
+            return;
+        }
+
+        String sql = UPDATE_SQL_PREFIX + tableName
+                + " SET is_locked = 0, locking_server = NULL, lock_timestamp = 0 WHERE uuid = ? AND locking_server = ? AND lock_version = ?";
+        try (Connection connection = getConnection();
+                PreparedStatement releaseStatement = connection.prepareStatement(sql)) {
+            releaseStatement.setString(1, uuid.toString());
+            releaseStatement.setString(2, serverId);
+            releaseStatement.setLong(3, lockVersion);
+            releaseStatement.executeUpdate();
+        } catch (Exception e) {
+            LOGGER.log(java.util.logging.Level.SEVERE, "Failed to release lock for {0} on server {1} (version {2}): {3}", new Object[]{uuid, serverId, lockVersion, e.getMessage()});
+        }
+    }
+
+    public void releaseLock(UUID uuid, String serverId) {
+        if (serverId == null || serverId.isEmpty()) {
+            LOGGER.log(java.util.logging.Level.SEVERE, "CRITICAL: releaseLock was called with a null or empty serverId for UUID: {0}", uuid);
+            return;
+        }
+
+        String sql = UPDATE_SQL_PREFIX + tableName
+                + " SET is_locked = 0, locking_server = NULL, lock_timestamp = 0 WHERE uuid = ? AND locking_server = ?";
+        try (Connection connection = getConnection();
+                PreparedStatement releaseStatement = connection.prepareStatement(sql)) {
+            releaseStatement.setString(1, uuid.toString());
+            releaseStatement.setString(2, serverId);
+            releaseStatement.executeUpdate();
+        } catch (Exception e) {
+            LOGGER.log(java.util.logging.Level.SEVERE, "Failed to release lock for {0} on server {1}: {2}", new Object[]{uuid, serverId, e.getMessage()});
+        }
+    }
+
+
+    /**
+     * Forcefully releases the lock for a player, regardless of which server holds
+     * it.
+     * Used by the admin unlock command.
+     */
+    public boolean releaseLock(UUID uuid) {
+        String sql = UPDATE_SQL_PREFIX + tableName
+                + " SET is_locked = 0, locking_server = NULL, lock_timestamp = 0 WHERE uuid = ?";
+        try (Connection connection = getConnection();
+                PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, uuid.toString());
+            int rows = statement.executeUpdate();
+            return rows > 0;
+        } catch (SQLException e) {
+            LOGGER.log(java.util.logging.Level.SEVERE, "Failed to force release lock for {0}: {1}", new Object[]{uuid, e.getMessage()});
+            return false;
+        }
+    }
+
+    public boolean isLockOwner(UUID uuid, String serverId) {
+        String query = "SELECT locking_server FROM " + tableName + WHERE_UUID_SQL;
+        try (Connection connection = getConnection();
+                PreparedStatement checkStmt = connection.prepareStatement(query)) {
+            checkStmt.setString(1, uuid.toString());
+            try (ResultSet rs = checkStmt.executeQuery()) {
+                if (rs.next()) {
+                    return serverId.equals(rs.getString("locking_server"));
+                }
+            }
+        } catch (SQLException e) {
+            LOGGER.log(java.util.logging.Level.SEVERE, "Failed to check lock owner for {0}: {1}", new Object[]{uuid, e.getMessage()});
+        }
+        return false;
+    }
+
+    public void updateLock(UUID uuid, String serverId, long lockVersion) {
+        if (lockVersion <= 0) {
+            updateLock(uuid, serverId);
+            return;
+        }
+        String sql = UPDATE_SQL_PREFIX + tableName + " SET lock_timestamp = " + currentTimeFunction + " WHERE uuid = ? AND locking_server = ? AND lock_version = ?";
+        try (Connection connection = getConnection();
+                PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, uuid.toString());
+            statement.setString(2, serverId);
+            statement.setLong(3, lockVersion);
+            statement.executeUpdate();
+        } catch (SQLException e) {
+            LOGGER.log(java.util.logging.Level.SEVERE, "Failed to update lock for {0} (version {1}): {2}", new Object[]{uuid, lockVersion, e.getMessage()});
+        }
+    }
+
+    public void updateLock(UUID uuid, String serverId) {
+        String sql = UPDATE_SQL_PREFIX + tableName + " SET lock_timestamp = " + currentTimeFunction + " WHERE uuid = ? AND locking_server = ?";
+        try (Connection connection = getConnection();
+                PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, uuid.toString());
+            statement.setString(2, serverId);
+            statement.executeUpdate();
+        } catch (SQLException e) {
+            LOGGER.log(java.util.logging.Level.SEVERE, "Failed to update lock for {0}: {1}", new Object[]{uuid, e.getMessage()});
+        }
+    }
+
+
+    public void updateLastKnownName(UUID uuid, String name, String seed) {
+        String sql = UPDATE_SQL_PREFIX + tableName + " SET last_known_name = ?, identity_hash = ?, name_last_updated = ? WHERE uuid = ?";
+        try (Connection connection = getConnection();
+                PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, name);
+            statement.setString(2, HashUtils.generateIdentityHash(name, uuid, seed));
+            statement.setLong(3, System.currentTimeMillis());
+            statement.setString(4, uuid.toString());
+            statement.executeUpdate();
+        } catch (SQLException e) {
+            LOGGER.log(java.util.logging.Level.SEVERE, "Failed to update last known name for {0}: {1}", new Object[]{uuid, e.getMessage()});
+        }
+    }
+
+    public void updateLastKnownName(UUID uuid, String name) {
+        updateLastKnownName(uuid, name, null);
+    }
+
+    public UUID getUuidByName(String name) {
+        String sql = "SELECT uuid FROM " + tableName + " WHERE last_known_name = ? ORDER BY name_last_updated DESC, last_updated DESC LIMIT 1";
+        try (Connection connection = getConnection();
+                PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, name);
+            try (java.sql.ResultSet rs = statement.executeQuery()) {
+                if (rs.next()) {
+                    return UUID.fromString(rs.getString("uuid"));
+                }
+            }
+        } catch (Exception e) {
+            LOGGER.log(java.util.logging.Level.SEVERE, "Failed to get UUID by name: {0}", e.getMessage());
+        }
+        return null;
+    }
+
+    public IdentityRecord getIdentityRecord(UUID uuid) {
+        String sql = "SELECT last_known_name, identity_hash, name_last_updated FROM " + tableName + WHERE_UUID_SQL;
+        try (Connection connection = getConnection();
+                PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, uuid.toString());
+            try (java.sql.ResultSet rs = statement.executeQuery()) {
+                if (rs.next()) {
+                    return new IdentityRecord(
+                            rs.getString("last_known_name"),
+                            rs.getString("identity_hash"),
+                            rs.getLong("name_last_updated")
+                    );
+                }
+            }
+        } catch (Exception e) {
+            LOGGER.log(java.util.logging.Level.SEVERE, "Failed to get identity record for {0}: {1}", new Object[]{uuid, e.getMessage()});
+        }
+        return null;
+    }
+
+    public static class IdentityRecord {
+        private final String lastKnownName;
+        private final String identityHash;
+        private final long nameLastUpdated;
+
+        public IdentityRecord(String lastKnownName, String identityHash, long nameLastUpdated) {
+            this.lastKnownName = lastKnownName;
+            this.identityHash = identityHash;
+            this.nameLastUpdated = nameLastUpdated;
+        }
+
+        public String getLastKnownName() { return lastKnownName; }
+        public String getIdentityHash() { return identityHash; }
+        public long getNameLastUpdated() { return nameLastUpdated; }
+    }
+
+
+    @SuppressWarnings("java:S1168") // null preserves SQL NULL semantics for BLOB columns
+    public byte[] serializeListToBlob(List<String> list) {
+        if (list == null) return null;
+        if ("binary".equals(serializationFormat)) {
+            return serializeListToBinary(list);
+        } else {
+            return serializeListToJson(list);
+        }
+    }
+
+    public List<String> deserializeListFromBlob(byte[] blob) {
+        if (blob == null) return new ArrayList<>();
+        if (blob.length > 0 && blob[0] == (byte) '[') {
+            return deserializeListFromJson(blob);
+        } else {
+            return deserializeListFromBinary(blob);
+        }
+    }
+
+    private byte[] serializeListToBinary(List<String> list) {
+        java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
+        try (java.io.DataOutputStream dos = new java.io.DataOutputStream(baos)) {
+            dos.writeInt(list.size());
+            for (String item : list) {
+                if (item == null || item.isEmpty()) {
+                    dos.writeInt(-1);
+                } else {
+                    byte[] bytes;
+                    if (item.startsWith("{")) {
+                        bytes = item.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                    } else {
+                        bytes = decodeItemBytes(item);
+                    }
+                    dos.writeInt(bytes.length);
+                    dos.write(bytes);
+                }
+            }
+        } catch (java.io.IOException e) {
+            LOGGER.log(java.util.logging.Level.SEVERE, "Failed binary list serialization: {0}", e.getMessage());
+        }
+        return baos.toByteArray();
+    }
+
+    private List<String> deserializeListFromBinary(byte[] blob) {
+        List<String> list = new ArrayList<>();
+        java.io.ByteArrayInputStream bais = new java.io.ByteArrayInputStream(blob);
+        try (java.io.DataInputStream dis = new java.io.DataInputStream(bais)) {
+            int size = dis.readInt();
+            if (size < 0 || size > 1000) {
+                LOGGER.log(java.util.logging.Level.WARNING, "Binary deserialization aborted: invalid list size {0}", size);
+                return list;
+            }
+            boolean success = true;
+            for (int i = 0; i < size && success; i++) {
+                success = readAndAddBinaryItem(dis, list, i);
+            }
+        } catch (java.io.IOException _) {
+            // Corrupt or empty stream
+        }
+        return list;
+    }
+
+    private boolean readAndAddBinaryItem(java.io.DataInputStream dis, List<String> list, int index) throws java.io.IOException {
+        if (dis.available() < 4) {
+            LOGGER.log(java.util.logging.Level.WARNING, "Binary deserialization aborted: unexpected end of stream at index {0}", index);
+            return false;
+        }
+        int len = dis.readInt();
+        if (len == -1) {
+            list.add(null);
+            return true;
+        }
+        if (len < 0 || len > 1024 * 1024) { // 1 MB limit
+            LOGGER.log(java.util.logging.Level.WARNING, "Binary deserialization aborted: invalid item length {0} at index {1}", new Object[]{len, index});
+            return false;
+        }
+        if (dis.available() < len) {
+            LOGGER.log(java.util.logging.Level.WARNING, "Binary deserialization aborted: not enough bytes available for item of length {0} at index {1}", new Object[]{len, index});
+            return false;
+        }
+        byte[] bytes = new byte[len];
+        dis.readFully(bytes);
+        if (bytes.length > 2 && bytes[0] == (byte) '{') {
+            list.add(new String(bytes, java.nio.charset.StandardCharsets.UTF_8));
+        } else {
+            list.add(Base64.getEncoder().encodeToString(bytes));
+        }
+        return true;
+    }
+
+    private byte[] serializeListToJson(List<String> list) {
+        String json = GSON.toJson(list);
+        return json.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+    }
+
+    private static byte[] decodeItemBytes(String item) {
+        try {
+            return Base64.getDecoder().decode(item);
+        } catch (IllegalArgumentException _) {
+            return item.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<String> deserializeListFromJson(byte[] blob) {
+        String json = new String(blob, java.nio.charset.StandardCharsets.UTF_8);
+        return GSON.fromJson(json, List.class);
+    }
+
+    public boolean savePlayerDataComponents(de.jumpstone.plugins.HMTSync plugin, PlayerData data, UUID uuid) throws SQLException {
+        try (Connection connection = getConnection()) {
+            connection.setAutoCommit(false);
+            try {
+                savePlayerDataComponentsInternal(connection, plugin, data, uuid);
+                connection.commit();
+                return true;
+            } catch (SQLException e) {
+                connection.rollback();
+                throw e;
+            } finally {
+                connection.setAutoCommit(true);
+            }
+        }
+    }
+
+    private void savePlayerDataComponentsInternal(Connection connection, de.jumpstone.plugins.HMTSync plugin, PlayerData data, UUID uuid) throws SQLException {
+        saveInventoryComponent(connection, plugin, data, uuid);
+        saveStatisticsComponent(connection, plugin, data, uuid);
+        saveMetadataComponent(connection, plugin, data, uuid);
+        saveCompanionComponent(connection, plugin, data, uuid);
+        saveMapComponent(connection, plugin, data, uuid);
+    }
+
+
+    public boolean saveInventoryComponent(de.jumpstone.plugins.HMTSync plugin, PlayerData data, UUID uuid) throws SQLException {
+        try (Connection connection = getConnection()) {
+            saveInventoryComponent(connection, plugin, data, uuid);
+            return true;
+        }
+    }
+
+    private static final String FEATURE_INVENTORY = "inventory";
+    private static final String FEATURE_ARMOR = "armor";
+    private static final String FEATURE_ENDER_CHEST = "ender-chest";
+
+    private void saveInventoryComponent(Connection connection, de.jumpstone.plugins.HMTSync plugin, PlayerData data, UUID uuid) throws SQLException {
+        boolean separateGamemodes = plugin.isSyncEnabledNewFeature("separate-gamemode-inventories");
+        String activeGamemode = data.getGameMode() != null ? data.getGameMode() : GAMEMODE_SURVIVAL;
+        String targetTable = separateGamemodes ? gamemodeInventoriesTable : inventoriesTable;
+
+        byte[][] blobs = fetchCurrentInventoryBlobs(connection, separateGamemodes, activeGamemode, targetTable, uuid);
+        byte[] targetInventory = plugin.isSyncEnabled(FEATURE_INVENTORY) ? serializeListToBlob(data.getInventoryContentsNBT()) : blobs[0];
+        byte[] targetArmor = plugin.isSyncEnabled(FEATURE_ARMOR) ? serializeListToBlob(data.getArmorContentsNBT()) : blobs[1];
+        byte[] targetEnderChest = plugin.isSyncEnabledNewFeature(FEATURE_ENDER_CHEST) ? serializeListToBlob(data.getEnderChestContentsNBT()) : blobs[2];
+
+        executeUpsertInventory(connection, separateGamemodes, activeGamemode, targetTable, uuid, targetInventory, targetArmor, targetEnderChest);
+    }
+
+    private byte[][] fetchCurrentInventoryBlobs(Connection connection, boolean separateGamemodes, String activeGamemode, String targetTable, UUID uuid) throws SQLException {
+        byte[] dbInventory = null;
+        byte[] dbArmor = null;
+        byte[] dbEnderChest = null;
+
+        String whereClause = separateGamemodes ? " WHERE uuid = ? AND gamemode = ?" : WHERE_UUID_SQL;
+        String sqlSelect = SQL_SELECT_PREFIX + COL_INVENTORY_BLOB + ", " + COL_ARMOR_BLOB + ", " + COL_ENDER_CHEST_BLOB + SQL_FROM + targetTable + whereClause;
+
+        try (PreparedStatement selectStmt = connection.prepareStatement(sqlSelect)) {
+            selectStmt.setString(1, uuid.toString());
+            if (separateGamemodes) {
+                selectStmt.setString(2, activeGamemode);
+            }
+            try (ResultSet rs = selectStmt.executeQuery()) {
+                if (rs.next()) {
+                    dbInventory = rs.getBytes(COL_INVENTORY_BLOB);
+                    dbArmor = rs.getBytes(COL_ARMOR_BLOB);
+                    dbEnderChest = rs.getBytes(COL_ENDER_CHEST_BLOB);
+                }
+            }
+        }
+        return new byte[][]{dbInventory, dbArmor, dbEnderChest};
+    }
+
+    private void executeUpsertInventory(Connection connection, boolean separateGamemodes, String activeGamemode, String targetTable, UUID uuid, byte[] inv, byte[] armor, byte[] ec) throws SQLException {
+        String sqlUpsert;
+        if (separateGamemodes) {
+            if (isSQLite) {
+                sqlUpsert = INSERT_INTO_SQL + targetTable + " (uuid, gamemode, inventory_blob, armor_blob, ender_chest_blob) VALUES (?, ?, ?, ?, ?) " +
+                            "ON CONFLICT(uuid, gamemode) DO UPDATE SET inventory_blob = excluded.inventory_blob, armor_blob = excluded.armor_blob, ender_chest_blob = excluded.ender_chest_blob";
+            } else {
+                sqlUpsert = INSERT_INTO_SQL + targetTable + " (uuid, gamemode, inventory_blob, armor_blob, ender_chest_blob) VALUES (?, ?, ?, ?, ?) " +
+                            "ON DUPLICATE KEY UPDATE inventory_blob = VALUES(inventory_blob), armor_blob = VALUES(armor_blob), ender_chest_blob = VALUES(ender_chest_blob)";
+            }
+        } else {
+            if (isSQLite) {
+                sqlUpsert = INSERT_INTO_SQL + targetTable + " (uuid, inventory_blob, armor_blob, ender_chest_blob) VALUES (?, ?, ?, ?) " +
+                            "ON CONFLICT(uuid) DO UPDATE SET inventory_blob = excluded.inventory_blob, armor_blob = excluded.armor_blob, ender_chest_blob = excluded.ender_chest_blob";
+            } else {
+                sqlUpsert = INSERT_INTO_SQL + targetTable + " (uuid, inventory_blob, armor_blob, ender_chest_blob) VALUES (?, ?, ?, ?) " +
+                            "ON DUPLICATE KEY UPDATE inventory_blob = VALUES(inventory_blob), armor_blob = VALUES(armor_blob), ender_chest_blob = VALUES(ender_chest_blob)";
+            }
+        }
+
+        try (PreparedStatement stmt = connection.prepareStatement(sqlUpsert)) {
+            stmt.setString(1, uuid.toString());
+            if (separateGamemodes) {
+                stmt.setString(2, activeGamemode);
+                stmt.setBytes(3, inv);
+                stmt.setBytes(4, armor);
+                stmt.setBytes(5, ec);
+            } else {
+                stmt.setBytes(2, inv);
+                stmt.setBytes(3, armor);
+                stmt.setBytes(4, ec);
+            }
+            stmt.executeUpdate();
+        }
+    }
+
+    @SuppressWarnings("null")
+    private void saveStatisticsComponent(Connection connection, de.jumpstone.plugins.HMTSync plugin, PlayerData data, UUID uuid) throws SQLException {
+        double dbHealth = 20.0;
+        int dbFoodLevel = 20;
+        int dbXpLevel = 0;
+        float dbXpExp = 0.0f;
+        int dbXpTotal = 0;
+        float dbSaturation = 5.0f;
+        float dbExhaustion = 0.0f;
+        String dbVanillaStatsJson = "{}";
+
+        String sqlSelect = SQL_SELECT_PREFIX + COL_HEALTH + ", food_level, xp_level, xp_exp, xp_total, saturation, exhaustion, vanilla_stats_json" + SQL_FROM + statisticsTable + WHERE_UUID_SQL;
+        try (PreparedStatement selectStmt = connection.prepareStatement(sqlSelect)) {
+            selectStmt.setString(1, uuid.toString());
+            try (ResultSet rs = selectStmt.executeQuery()) {
+                if (rs.next()) {
+                    dbHealth = rs.getDouble(COL_HEALTH);
+                    dbFoodLevel = rs.getInt("food_level");
+                    dbXpLevel = rs.getInt("xp_level");
+                    dbXpExp = rs.getFloat("xp_exp");
+                    dbXpTotal = rs.getInt("xp_total");
+                    dbSaturation = rs.getFloat("saturation");
+                    dbExhaustion = rs.getFloat("exhaustion");
+                    dbVanillaStatsJson = rs.getString("vanilla_stats_json");
+                    if (dbVanillaStatsJson == null) dbVanillaStatsJson = "{}";
+                }
+            }
+        }
+
+        double targetHealth = plugin.isSyncEnabled(COL_HEALTH) ? data.getHealth() : dbHealth;
+        int targetFoodLevel = dbFoodLevel;
+        float targetSaturation = dbSaturation;
+        float targetExhaustion = dbExhaustion;
+        if (plugin.isSyncEnabled("food-level")) {
+            targetFoodLevel = data.getFoodLevel();
+            targetSaturation = data.getSaturation();
+            targetExhaustion = data.getExhaustion();
+        }
+        int targetXpLevel = dbXpLevel;
+        float targetXpExp = dbXpExp;
+        int targetXpTotal = dbXpTotal;
+        if (plugin.isSyncEnabled("experience")) {
+            targetXpLevel = data.getLevel();
+            targetXpExp = data.getExp();
+            targetXpTotal = data.getTotalExperience();
+        }
+
+        PlayerData jsonStatsData;
+        try {
+            PlayerData parsed = GSON.fromJson(dbVanillaStatsJson, PlayerData.class);
+            jsonStatsData = (parsed != null) ? parsed : new PlayerData();
+        } catch (Exception e) {
+            throw new SQLException("Failed to parse vanilla statistics JSON from database, aborting save to prevent data loss: " + e.getMessage(), e);
+        }
+        if (plugin.isSyncEnabled("potion-effects")) jsonStatsData.setPotionEffects(data.getPotionEffects());
+        if (plugin.isSyncEnabled("flight-gamemode")) {
+            jsonStatsData.setFlying(data.isFlying());
+            jsonStatsData.setAllowFlight(data.isAllowFlight());
+            jsonStatsData.setGameMode(data.getGameMode());
+        }
+        if (plugin.isSyncEnabledNewFeature("location")) {
+            jsonStatsData.setWorld(data.getWorld());
+            jsonStatsData.setX(data.getX());
+            jsonStatsData.setY(data.getY());
+            jsonStatsData.setZ(data.getZ());
+            jsonStatsData.setYaw(data.getYaw());
+            jsonStatsData.setPitch(data.getPitch());
+        }
+        if (plugin.isSyncEnabledNewFeature("statistics")) jsonStatsData.setStatistics(data.getStatistics());
+        jsonStatsData.setDiscoveredRecipes(data.getDiscoveredRecipes());
+
+        String targetVanillaStatsJson = GSON.toJson(jsonStatsData);
+
+        String sqlUpsert;
+        if (isSQLite) {
+            sqlUpsert = INSERT_INTO_SQL + statisticsTable + " (uuid, " + COL_HEALTH + ", food_level, xp_level, xp_exp, xp_total, saturation, exhaustion, vanilla_stats_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+                        "ON CONFLICT(uuid) DO UPDATE SET " + COL_HEALTH + " = excluded." + COL_HEALTH + ", food_level = excluded.food_level, xp_level = excluded.xp_level, xp_exp = excluded.xp_exp, " +
+                        "xp_total = excluded.xp_total, saturation = excluded.saturation, exhaustion = excluded.exhaustion, vanilla_stats_json = excluded.vanilla_stats_json";
+        } else {
+            sqlUpsert = INSERT_INTO_SQL + statisticsTable + " (uuid, " + COL_HEALTH + ", food_level, xp_level, xp_exp, xp_total, saturation, exhaustion, vanilla_stats_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+                        "ON DUPLICATE KEY UPDATE " + COL_HEALTH + " = VALUES(" + COL_HEALTH + "), food_level = VALUES(food_level), xp_level = VALUES(xp_level), xp_exp = VALUES(xp_exp), " +
+                        "xp_total = VALUES(xp_total), saturation = VALUES(saturation), exhaustion = VALUES(exhaustion), vanilla_stats_json = VALUES(vanilla_stats_json)";
+        }
+        try (PreparedStatement stmt = connection.prepareStatement(sqlUpsert)) {
+            stmt.setString(1, uuid.toString());
+            stmt.setDouble(2, targetHealth);
+            stmt.setInt(3, targetFoodLevel);
+            stmt.setInt(4, targetXpLevel);
+            stmt.setFloat(5, targetXpExp);
+            stmt.setInt(6, targetXpTotal);
+            stmt.setFloat(7, targetSaturation);
+            stmt.setFloat(8, targetExhaustion);
+            stmt.setString(9, targetVanillaStatsJson);
+            stmt.executeUpdate();
+        }
+    }
+
+    private void saveMetadataComponent(Connection connection, de.jumpstone.plugins.HMTSync plugin, PlayerData data, UUID uuid) throws SQLException {
+        String dbPdc = null;
+        String dbAdvancements = null;
+
+        String sqlSelect = SQL_SELECT_PREFIX + "pdc_data, " + COL_ADVANCEMENTS + SQL_FROM + metadataTable + WHERE_UUID_SQL;
+        try (PreparedStatement selectStmt = connection.prepareStatement(sqlSelect)) {
+            selectStmt.setString(1, uuid.toString());
+            try (ResultSet rs = selectStmt.executeQuery()) {
+                if (rs.next()) {
+                    dbPdc = rs.getString("pdc_data");
+                    dbAdvancements = rs.getString(COL_ADVANCEMENTS);
+                }
+            }
+        }
+
+        String targetPdc = plugin.isSyncEnabled("pdc") ? data.getPdcNBT() : dbPdc;
+        String targetAdvancements = plugin.isSyncEnabled(COL_ADVANCEMENTS) ? GSON.toJson(data.getAdvancements()) : dbAdvancements;
+
+        String sqlUpsert;
+        if (isSQLite) {
+            sqlUpsert = INSERT_INTO_SQL + metadataTable + " (uuid, pdc_data, " + COL_ADVANCEMENTS + ") VALUES (?, ?, ?) " +
+                        "ON CONFLICT(uuid) DO UPDATE SET pdc_data = excluded.pdc_data, " + COL_ADVANCEMENTS + " = excluded." + COL_ADVANCEMENTS;
+        } else {
+            sqlUpsert = INSERT_INTO_SQL + metadataTable + " (uuid, pdc_data, " + COL_ADVANCEMENTS + ") VALUES (?, ?, ?) " +
+                        "ON DUPLICATE KEY UPDATE pdc_data = VALUES(pdc_data), " + COL_ADVANCEMENTS + " = VALUES(" + COL_ADVANCEMENTS + ")";
+        }
+        try (PreparedStatement stmt = connection.prepareStatement(sqlUpsert)) {
+            stmt.setString(1, uuid.toString());
+            stmt.setString(2, targetPdc);
+            stmt.setString(3, targetAdvancements);
+            stmt.executeUpdate();
+        }
+    }
+
+    private void saveCompanionComponent(Connection connection, de.jumpstone.plugins.HMTSync plugin, PlayerData data, UUID uuid) throws SQLException {
+        if (!plugin.isSyncEnabledNewFeature("companions")) return;
+        String mode = MODE_FOLLOW;
+        try {
+            mode = plugin.getConfig().getString("companions.mode", MODE_FOLLOW).toLowerCase();
+        } catch (Exception _) { /* default to follow if config is missing */ }
+        if (mode.equals(MODE_UNTRACKED) || mode.equals("off")) return;
+
+        String dbCompanionsNbt = null;
+        String sqlSelect = "SELECT companions_nbt FROM " + companionsTable + WHERE_UUID_SQL;
+        try (PreparedStatement selectStmt = connection.prepareStatement(sqlSelect)) {
+            selectStmt.setString(1, uuid.toString());
+            try (ResultSet rs = selectStmt.executeQuery()) {
+                if (rs.next()) dbCompanionsNbt = rs.getString("companions_nbt");
+            }
+        }
+
+        String targetCompanionsNbt = mergeCompanionsNbt(data.getCompanionsNBT(), dbCompanionsNbt, mode, plugin.getServerId());
+
+        String sqlUpsert;
+        if (isSQLite) {
+            sqlUpsert = INSERT_INTO_SQL + companionsTable + " (uuid, companions_nbt) VALUES (?, ?) " +
+                        "ON CONFLICT(uuid) DO UPDATE SET companions_nbt = excluded.companions_nbt";
+        } else {
+            sqlUpsert = INSERT_INTO_SQL + companionsTable + " (uuid, companions_nbt) VALUES (?, ?) " +
+                        "ON DUPLICATE KEY UPDATE companions_nbt = VALUES(companions_nbt)";
+        }
+        try (PreparedStatement stmt = connection.prepareStatement(sqlUpsert)) {
+            stmt.setString(1, uuid.toString());
+            stmt.setString(2, targetCompanionsNbt);
+            stmt.executeUpdate();
+        }
+    }
+
+    private void saveMapComponent(Connection connection, de.jumpstone.plugins.HMTSync plugin, PlayerData data, UUID uuid) throws SQLException {
+        if (!plugin.isSyncEnabledNewFeature("maps")) return;
+
+        String dbMapsNbt = null;
+        String sqlSelect = "SELECT maps_nbt FROM " + mapsTable + WHERE_UUID_SQL;
+        try (PreparedStatement selectStmt = connection.prepareStatement(sqlSelect)) {
+            selectStmt.setString(1, uuid.toString());
+            try (ResultSet rs = selectStmt.executeQuery()) {
+                if (rs.next()) dbMapsNbt = rs.getString("maps_nbt");
+            }
+        }
+
+        String targetMapsNbt = mergeMapsNbt(data.getMapsNBT(), dbMapsNbt);
+
+        String sqlUpsert;
+        if (isSQLite) {
+            sqlUpsert = INSERT_INTO_SQL + mapsTable + " (uuid, maps_nbt) VALUES (?, ?) " +
+                        "ON CONFLICT(uuid) DO UPDATE SET maps_nbt = excluded.maps_nbt";
+        } else {
+            sqlUpsert = INSERT_INTO_SQL + mapsTable + " (uuid, maps_nbt) VALUES (?, ?) " +
+                        "ON DUPLICATE KEY UPDATE maps_nbt = VALUES(maps_nbt)";
+        }
+        try (PreparedStatement stmt = connection.prepareStatement(sqlUpsert)) {
+            stmt.setString(1, uuid.toString());
+            stmt.setString(2, targetMapsNbt);
+            stmt.executeUpdate();
+        }
+    }
+
+    public String mergeMapsNbt(String localMapsNbt, String dbMapsNbt) {
+        if (localMapsNbt == null) {
+            return dbMapsNbt;
+        }
+
+        if (dbMapsNbt == null || dbMapsNbt.isEmpty()) {
+            return localMapsNbt;
+        }
+
+        try {
+            de.jumpstone.plugins.utils.MapSnapshot[] localSnaps = parseMapSnapshots(localMapsNbt);
+            de.jumpstone.plugins.utils.MapSnapshot[] dbSnaps = parseMapSnapshots(dbMapsNbt);
+            List<de.jumpstone.plugins.utils.MapSnapshot> merged = new ArrayList<>();
+
+            // Build lookup of DB snapshots by slot and mapId for pixel buffer preservation
+            java.util.Map<String, de.jumpstone.plugins.utils.MapSnapshot> dbSlotLookup = new java.util.HashMap<>();
+            java.util.Map<String, de.jumpstone.plugins.utils.MapSnapshot> dbMapIdLookup = new java.util.HashMap<>();
+            if (dbSnaps != null) {
+                for (de.jumpstone.plugins.utils.MapSnapshot dbSnap : dbSnaps) {
+                    if (dbSnap != null) {
+                        dbSlotLookup.put(dbSnap.getSlot() + ":" + dbSnap.getInventoryType(), dbSnap);
+                        if (dbSnap.getOriginalMapId() > 0) {
+                            dbMapIdLookup.put(dbSnap.getOriginalMapId() + ":" + dbSnap.getInventoryType(), dbSnap);
+                        }
+                    }
+                }
+            }
+
+            if (localSnaps != null) {
+                for (de.jumpstone.plugins.utils.MapSnapshot localSnap : localSnaps) {
+                    if (localSnap != null) {
+                        if (localSnap.getCanvasPixels() == null || localSnap.getCanvasPixels().length == 0) {
+                            de.jumpstone.plugins.utils.MapSnapshot existing = dbSlotLookup.get(localSnap.getSlot() + ":" + localSnap.getInventoryType());
+                            if (existing == null && localSnap.getOriginalMapId() > 0) {
+                                existing = dbMapIdLookup.get(localSnap.getOriginalMapId() + ":" + localSnap.getInventoryType());
+                            }
+                            if (existing != null && existing.getCanvasPixels() != null && existing.getCanvasPixels().length > 0) {
+                                localSnap.setCanvasPixels(existing.getCanvasPixels());
+                            }
+                        }
+                        merged.add(localSnap);
+                    }
+                }
+            }
+            return merged.isEmpty() ? null : GSON.toJson(merged);
+        } catch (Exception e) {
+            LOGGER.log(java.util.logging.Level.WARNING, "Error merging maps: {0}", e.getMessage());
+            return localMapsNbt;
+        }
+    }
+
+    private de.jumpstone.plugins.utils.MapSnapshot[] parseMapSnapshots(String json) {
+        if (json == null || json.isEmpty()) return new de.jumpstone.plugins.utils.MapSnapshot[0];
+        try {
+            de.jumpstone.plugins.utils.MapSnapshot[] result = GSON.fromJson(json, de.jumpstone.plugins.utils.MapSnapshot[].class);
+            return result != null ? result : new de.jumpstone.plugins.utils.MapSnapshot[0];
+        } catch (Exception e) {
+            LOGGER.log(java.util.logging.Level.WARNING, "Failed to parse map snapshots: {0}", e.getMessage());
+            return new de.jumpstone.plugins.utils.MapSnapshot[0];
+        }
+    }
+
+    private String mergeCompanionsNbt(String localCompanionsNbt, String dbCompanionsNbt, String mode, String currentServer) {
+        if (localCompanionsNbt == null) {
+            if (!mode.equals(MODE_RETURN)) {
+                return null;
+            }
+            List<CompanionSnapshot> toKeep = new ArrayList<>();
+            CompanionSnapshot[] dbSnaps = parseCompanionSnapshots(dbCompanionsNbt);
+            addOtherServerCompanions(dbSnaps, toKeep, currentServer);
+            return toKeep.isEmpty() ? null : GSON.toJson(toKeep);
+        }
+
+        if (dbCompanionsNbt == null || dbCompanionsNbt.isEmpty()) {
+            return localCompanionsNbt;
+        }
+
+        try {
+            CompanionSnapshot[] localSnaps = parseCompanionSnapshots(localCompanionsNbt);
+            CompanionSnapshot[] dbSnaps = parseCompanionSnapshots(dbCompanionsNbt);
+            List<CompanionSnapshot> merged = new ArrayList<>();
+
+            if (mode.equals(MODE_RETURN)) {
+                addOtherServerCompanions(dbSnaps, merged, currentServer);
+            }
+
+            addAllNonNullSnapshots(localSnaps, merged);
+            return merged.isEmpty() ? null : GSON.toJson(merged);
+        } catch (Exception e) {
+            LOGGER.log(java.util.logging.Level.WARNING, "Error merging companions: {0}", e.getMessage());
+            return localCompanionsNbt;
+        }
+    }
+
+    private CompanionSnapshot[] parseCompanionSnapshots(String json) {
+        if (json == null || json.isEmpty()) return new CompanionSnapshot[0];
+        try {
+            CompanionSnapshot[] result = GSON.fromJson(json, CompanionSnapshot[].class);
+            return result != null ? result : new CompanionSnapshot[0];
+        } catch (Exception e) {
+            LOGGER.log(java.util.logging.Level.WARNING, "Failed to parse companion snapshots: {0}", e.getMessage());
+            return new CompanionSnapshot[0];
+        }
+    }
+
+    private void addOtherServerCompanions(CompanionSnapshot[] snaps, List<CompanionSnapshot> list, String currentServer) {
+        if (snaps == null) return;
+        for (CompanionSnapshot snap : snaps) {
+            if (snap != null && snap.getSourceServerId() != null && !snap.getSourceServerId().equalsIgnoreCase(currentServer)) {
+                list.add(snap);
+            }
+        }
+    }
+
+    private void addAllNonNullSnapshots(CompanionSnapshot[] snaps, List<CompanionSnapshot> list) {
+        if (snaps == null) return;
+        for (CompanionSnapshot snap : snaps) {
+            if (snap != null) {
+                list.add(snap);
+            }
+        }
+    }
+
+    public PlayerData loadPlayerDataComponents(de.jumpstone.plugins.HMTSync plugin, UUID uuid) throws SQLException {
+        return loadPlayerDataComponents(plugin, uuid, null, null);
+    }
+
+    public PlayerData loadPlayerDataComponents(de.jumpstone.plugins.HMTSync plugin, UUID uuid, String name) throws SQLException {
+        return loadPlayerDataComponents(plugin, uuid, name, null);
+    }
+
+    public PlayerData loadPlayerDataComponents(de.jumpstone.plugins.HMTSync plugin, UUID uuid, String name, String targetGameMode) throws SQLException {
+        // First check for legacy monolithic data in the main table
+        try (Connection connection = getConnection()) {
+            PlayerData legacy = loadLegacyData(connection, plugin, uuid, name);
+            if (legacy != null) return legacy;
+        }
+
+        // Component-based loading
+        PlayerData data = new PlayerData();
+        if (targetGameMode != null) {
+            data.setGameMode(targetGameMode);
+        }
+        boolean loadedAny = false;
+
+        try (Connection connection = getConnection()) {
+            loadedAny |= loadStatisticsComponent(connection, data, uuid);
+            if (targetGameMode != null) {
+                data.setGameMode(targetGameMode);
+            }
+            if (plugin.isSyncEnabled(FEATURE_INVENTORY) || plugin.isSyncEnabled(FEATURE_ARMOR) || plugin.isSyncEnabledNewFeature(FEATURE_ENDER_CHEST)) {
+                loadedAny |= loadInventoryComponent(connection, plugin, data, uuid);
+            }
+            if (plugin.isSyncEnabled("pdc") || plugin.isSyncEnabled(COL_ADVANCEMENTS)) {
+                loadedAny |= loadMetadataComponent(connection, data, uuid);
+            }
+            if (plugin.isSyncEnabledNewFeature("companions")) {
+                loadedAny |= loadCompanionComponent(connection, plugin, data, uuid);
+            }
+            if (plugin.isSyncEnabledNewFeature("maps")) {
+                loadedAny |= loadMapComponent(connection, plugin, data, uuid);
+            }
+
+            String sqlMeta = "SELECT lock_version, snapshot_checksum FROM " + tableName + WHERE_UUID_SQL;
+            try (PreparedStatement stmt = connection.prepareStatement(sqlMeta)) {
+                stmt.setString(1, uuid.toString());
+                try (ResultSet rs = stmt.executeQuery()) {
+                    if (rs.next()) {
+                        data.setLockVersion(rs.getLong("lock_version"));
+                        String storedChecksum = rs.getString("snapshot_checksum");
+                        if (storedChecksum != null && loadedAny && plugin.getConfig().getBoolean("security.verify-data-integrity", true)) {
+                            String computed = data.calculateSnapshotChecksum(plugin.getSecuritySeed());
+                            if (!storedChecksum.equalsIgnoreCase(computed)) {
+                                LOGGER.log(java.util.logging.Level.SEVERE,
+                                        "CRITICAL: Normalized snapshot integrity verification failed for player {0}! lock_version={1}, expected={2}, computed={3}",
+                                        new Object[]{uuid, data.getLockVersion(), storedChecksum, computed});
+                            }
+                        }
+                    }
+                }
+            } catch (SQLException _) {
+                // Column missing fallback for legacy databases before auto-migration
+            }
+        }
+
+        return loadedAny ? data : null;
+    }
+
+    @SuppressWarnings("null")
+    private PlayerData loadLegacyData(Connection connection, de.jumpstone.plugins.HMTSync plugin, UUID uuid, String name) throws SQLException {
+        String sqlSelectLegacy = "SELECT data, data_checksum FROM " + tableName + WHERE_UUID_SQL;
+        try (PreparedStatement statement = connection.prepareStatement(sqlSelectLegacy)) {
+            statement.setString(1, uuid.toString());
+            try (ResultSet rs = statement.executeQuery()) {
+                if (!rs.next()) return null;
+                byte[] dataBytes = rs.getBytes("data");
+                if (dataBytes == null || dataBytes.length == 0) return null;
+                String json = new String(dataBytes, java.nio.charset.StandardCharsets.UTF_8);
+                if (json.trim().isEmpty() || "{}".equals(json)) return null;
+
+                String checksum = rs.getString("data_checksum");
+                String seed = plugin.getSecuritySeed();
+                if (plugin.getConfig().getBoolean("security.verify-data-integrity", true)
+                        && checksum != null
+                        && !PlayerData.verifyChecksum(json, checksum, seed)
+                        && !PlayerData.verifyChecksum(json, checksum, null)) {
+                    LOGGER.log(java.util.logging.Level.SEVERE, "CRITICAL: Legacy checksum mismatch for {0}!", uuid);
+                    return null;
+                }
+                if (checksum != null
+                        && !PlayerData.verifyChecksum(json, checksum, seed)
+                        && PlayerData.verifyChecksum(json, checksum, null)
+                        && name != null) {
+                    plugin.getLogger().log(java.util.logging.Level.INFO, "Migrating data for {0} to salted checksum format", name);
+                }
+
+                PlayerData data = GSON.fromJson(json, PlayerData.class);
+                if (data != null) {
+                    // Save to component tables and null out legacy column inside a single transaction
+                    connection.setAutoCommit(false);
+                    try {
+                        savePlayerDataComponentsInternal(connection, plugin, data, uuid);
+                        String sqlClearLegacy = UPDATE_SQL_PREFIX + tableName + " SET data = NULL" + WHERE_UUID_SQL;
+                        try (PreparedStatement clearStmt = connection.prepareStatement(sqlClearLegacy)) {
+                            clearStmt.setString(1, uuid.toString());
+                            clearStmt.executeUpdate();
+                        }
+                        connection.commit();
+                    } catch (SQLException e) {
+                        connection.rollback();
+                        throw e;
+                    } finally {
+                        connection.setAutoCommit(true);
+                    }
+                }
+                return data;
+            }
+        }
+    }
+
+
+    private boolean loadInventoryComponent(Connection connection, de.jumpstone.plugins.HMTSync plugin, PlayerData data, UUID uuid) throws SQLException {
+        boolean separateGamemodes = plugin.isSyncEnabledNewFeature("separate-gamemode-inventories");
+        String activeGamemode = data.getGameMode() != null ? data.getGameMode() : GAMEMODE_SURVIVAL;
+        String targetTable = separateGamemodes ? gamemodeInventoriesTable : inventoriesTable;
+        String whereClause = separateGamemodes ? " WHERE uuid = ? AND gamemode = ?" : WHERE_UUID_SQL;
+
+        String sql = SQL_SELECT_PREFIX + COL_INVENTORY_BLOB + ", " + COL_ARMOR_BLOB + ", " + COL_ENDER_CHEST_BLOB + SQL_FROM + targetTable + whereClause;
+        try (PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setString(1, uuid.toString());
+            if (separateGamemodes) {
+                stmt.setString(2, activeGamemode);
+            }
+            try (ResultSet rs = stmt.executeQuery()) {
+                if (rs.next()) {
+                    populateInventoryDataFromResultSet(rs, plugin, data);
+                    return true;
+                }
+            }
+        }
+
+        // Fallback/Migration: If separate-gamemode-inventories is enabled but no entry exists in gamemodeInventoriesTable,
+        // check if an existing inventory profile exists in the unified inventoriesTable and migrate it to gamemodeInventoriesTable for activeGamemode (if SURVIVAL).
+        if (separateGamemodes && GAMEMODE_SURVIVAL.equalsIgnoreCase(activeGamemode)) {
+            String fallbackSql = SQL_SELECT_PREFIX + COL_INVENTORY_BLOB + ", " + COL_ARMOR_BLOB + ", " + COL_ENDER_CHEST_BLOB + SQL_FROM + inventoriesTable + WHERE_UUID_SQL;
+            try (PreparedStatement fallbackStmt = connection.prepareStatement(fallbackSql)) {
+                fallbackStmt.setString(1, uuid.toString());
+                try (ResultSet fallbackRs = fallbackStmt.executeQuery()) {
+                    if (fallbackRs.next()) {
+                        byte[] inv = fallbackRs.getBytes(COL_INVENTORY_BLOB);
+                        byte[] armor = fallbackRs.getBytes(COL_ARMOR_BLOB);
+                        byte[] ec = fallbackRs.getBytes(COL_ENDER_CHEST_BLOB);
+
+                        if (plugin.isSyncEnabled(FEATURE_INVENTORY)) {
+                            data.setInventoryContentsNBT(deserializeListFromBlob(inv));
+                        }
+                        if (plugin.isSyncEnabled(FEATURE_ARMOR)) {
+                            data.setArmorContentsNBT(deserializeListFromBlob(armor));
+                        }
+                        if (plugin.isSyncEnabledNewFeature(FEATURE_ENDER_CHEST)) {
+                            data.setEnderChestContentsNBT(deserializeListFromBlob(ec));
+                        }
+
+                        // Migrate existing inventory into gamemode table for activeGamemode
+                        executeUpsertInventory(connection, true, activeGamemode, gamemodeInventoriesTable, uuid, inv, armor, ec);
+                        return true;
+                    }
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private void populateInventoryDataFromResultSet(ResultSet rs, de.jumpstone.plugins.HMTSync plugin, PlayerData data) throws SQLException {
+        if (plugin.isSyncEnabled(FEATURE_INVENTORY)) {
+            data.setInventoryContentsNBT(deserializeListFromBlob(rs.getBytes(COL_INVENTORY_BLOB)));
+        }
+        if (plugin.isSyncEnabled(FEATURE_ARMOR)) {
+            data.setArmorContentsNBT(deserializeListFromBlob(rs.getBytes(COL_ARMOR_BLOB)));
+        }
+        if (plugin.isSyncEnabledNewFeature(FEATURE_ENDER_CHEST)) {
+            data.setEnderChestContentsNBT(deserializeListFromBlob(rs.getBytes(COL_ENDER_CHEST_BLOB)));
+        }
+    }
+
+    private boolean loadStatisticsComponent(Connection connection, PlayerData data, UUID uuid) throws SQLException {
+        String sqlStats = SQL_SELECT_PREFIX + COL_HEALTH + ", food_level, xp_level, xp_exp, xp_total, saturation, exhaustion, vanilla_stats_json" + SQL_FROM + statisticsTable + WHERE_UUID_SQL;
+        try (PreparedStatement stmt = connection.prepareStatement(sqlStats)) {
+            stmt.setString(1, uuid.toString());
+            try (ResultSet rs = stmt.executeQuery()) {
+                if (!rs.next()) return false;
+                data.setHealth(rs.getDouble(COL_HEALTH));
+                data.setFoodLevel(rs.getInt("food_level"));
+                data.setLevel(rs.getInt("xp_level"));
+                data.setExp(rs.getFloat("xp_exp"));
+                data.setTotalExperience(rs.getInt("xp_total"));
+                data.setSaturation(rs.getFloat("saturation"));
+                data.setExhaustion(rs.getFloat("exhaustion"));
+                String json = rs.getString("vanilla_stats_json");
+                if (json != null && !json.isEmpty() && !"{}".equals(json)) {
+                    try {
+                        applyVanillaStats(data, GSON.fromJson(json, PlayerData.class));
+                    } catch (Exception e) {
+                        LOGGER.log(java.util.logging.Level.WARNING, "Failed to parse vanilla stats JSON for {0}: {1}", new Object[]{uuid, e.getMessage()});
+                    }
                 }
                 return true;
             }
-            if (logger != null) {
-                logger.warning("[HMTSync-Hybrid] Redis lock acquisition failed, falling back to MySQL for " + uuid);
+        }
+    }
+
+    private static void applyVanillaStats(PlayerData data, PlayerData temp) {
+        if (temp == null) return;
+        if (temp.getPotionEffects() != null) data.setPotionEffects(temp.getPotionEffects());
+        if (temp.getDiscoveredRecipes() != null) data.setDiscoveredRecipes(temp.getDiscoveredRecipes());
+        if (temp.getGameMode() != null) data.setGameMode(temp.getGameMode());
+        data.setFlying(temp.isFlying());
+        data.setAllowFlight(temp.isAllowFlight());
+        if (temp.getWorld() != null) {
+            data.setWorld(temp.getWorld());
+            data.setX(temp.getX());
+            data.setY(temp.getY());
+            data.setZ(temp.getZ());
+            data.setYaw(temp.getYaw());
+            data.setPitch(temp.getPitch());
+        }
+        if (temp.getStatistics() != null) data.setStatistics(temp.getStatistics());
+    }
+
+    @SuppressWarnings({"unchecked", "null"})
+    private boolean loadMetadataComponent(Connection connection, PlayerData data, UUID uuid) throws SQLException {
+        String sqlMeta = SQL_SELECT_PREFIX + "pdc_data, " + COL_ADVANCEMENTS + SQL_FROM + metadataTable + WHERE_UUID_SQL;
+        try (PreparedStatement stmt = connection.prepareStatement(sqlMeta)) {
+            stmt.setString(1, uuid.toString());
+            try (ResultSet rs = stmt.executeQuery()) {
+                if (!rs.next()) return false;
+                String pdc = rs.getString("pdc_data");
+                String advancementsStr = rs.getString(COL_ADVANCEMENTS);
+                if (pdc != null) data.setPdcNBT(pdc);
+                if (advancementsStr != null) {
+                    try {
+                        Map<String, List<String>> advMap = GSON.fromJson(advancementsStr, Map.class);
+                        data.setAdvancements(advMap);
+                    } catch (Exception e) {
+                        LOGGER.log(java.util.logging.Level.WARNING, "Failed to parse advancements JSON for {0}: {1}", new Object[]{uuid, e.getMessage()});
+                    }
+                }
+                return true;
             }
         }
-
-        // Fallback to MySQL lock
-        boolean mysqlResult = acquireLock(uuid, serverId);
-        if (mysqlResult && logger != null) {
-            logger.info("[HMTSync-Hybrid] Lock acquired in MySQL for " + uuid + " by " + serverId);
-        }
-        return mysqlResult;
     }
 
-    /**
-     * Hybrid release lock - releases from both Redis and MySQL
-     */
-    public void releaseLockHybrid(UUID uuid, String serverId) {
-        // Release from Redis if in hybrid mode
-        if (isHybridMode()) {
-            redisManager.releaseLock(uuid, serverId);
-        }
+    private boolean loadCompanionComponent(Connection connection, de.jumpstone.plugins.HMTSync plugin, PlayerData data, UUID uuid) throws SQLException {
+        String mode = MODE_FOLLOW;
+        try {
+            mode = plugin.getConfig().getString("companions.mode", MODE_FOLLOW).toLowerCase();
+        } catch (Exception _) { /* default to follow if config is missing */ }
+        if (mode.equals(MODE_UNTRACKED) || mode.equals("off")) return false;
 
-        // Always release from MySQL for persistence
-        releaseLock(uuid, serverId);
+        String sqlComp = "SELECT companions_nbt FROM " + companionsTable + WHERE_UUID_SQL;
+        try (PreparedStatement stmt = connection.prepareStatement(sqlComp)) {
+            stmt.setString(1, uuid.toString());
+            try (ResultSet rs = stmt.executeQuery()) {
+                if (!rs.next()) return false;
+                String companionsNbt = rs.getString("companions_nbt");
+                if (companionsNbt != null && !companionsNbt.isEmpty()) {
+                    List<CompanionSnapshot> toSpawn = new ArrayList<>();
+                    List<CompanionSnapshot> toKeep = new ArrayList<>();
+                    
+                    parseAndFilterCompanions(companionsNbt, mode, plugin.getServerId(), toSpawn, toKeep);
+
+                    if (!toSpawn.isEmpty()) {
+                        data.setCompanionsNBT(GSON.toJson(toSpawn));
+                        // Do NOT update database companions on load to prevent sync-erase race conditions!
+                        return true;
+                    }
+                }
+                return false;
+            }
+        }
     }
 
-    /**
-     * Get hybrid mode statistics
-     */
-    public String getHybridStats() {
-        StringBuilder stats = new StringBuilder();
-        stats.append("Hybrid Mode: ").append(isHybridMode() ? "ENABLED" : "DISABLED");
+    private boolean loadMapComponent(Connection connection, de.jumpstone.plugins.HMTSync plugin, PlayerData data, UUID uuid) throws SQLException {
+        if (!plugin.isSyncEnabledNewFeature("maps")) return false;
 
-        if (isHybridMode()) {
-            stats.append(" | ").append(redisManager.getStats());
+        String sqlMap = "SELECT maps_nbt FROM " + mapsTable + WHERE_UUID_SQL;
+        try (PreparedStatement stmt = connection.prepareStatement(sqlMap)) {
+            stmt.setString(1, uuid.toString());
+            try (ResultSet rs = stmt.executeQuery()) {
+                if (!rs.next()) return false;
+                String mapsNbt = rs.getString("maps_nbt");
+                if (mapsNbt != null && !mapsNbt.isEmpty() && !"[]".equals(mapsNbt)) {
+                    data.setMapsNBT(mapsNbt);
+                    return true;
+                }
+                return false;
+            }
         }
+    }
 
-        return stats.toString();
+    private void parseAndFilterCompanions(String companionsNbt, String mode, String currentServer, List<CompanionSnapshot> toSpawn, List<CompanionSnapshot> toKeep) {
+        try {
+            CompanionSnapshot[] snapshots = GSON.fromJson(companionsNbt, CompanionSnapshot[].class);
+            if (snapshots != null) {
+                filterCompanionSnapshots(snapshots, mode, currentServer, toSpawn, toKeep);
+            }
+        } catch (Exception e) {
+            LOGGER.log(java.util.logging.Level.WARNING, "Failed to parse companion snapshots during spawn check: {0}", e.getMessage());
+            toSpawn.clear();
+            toKeep.clear();
+            CompanionSnapshot[] fallback = GSON.fromJson(companionsNbt, CompanionSnapshot[].class);
+            if (fallback != null) {
+                for (CompanionSnapshot snap : fallback) {
+                    if (snap != null) {
+                        toSpawn.add(snap);
+                    }
+                }
+            }
+        }
+    }
+
+    private void filterCompanionSnapshots(CompanionSnapshot[] snapshots, String mode, String currentServer, List<CompanionSnapshot> toSpawn, List<CompanionSnapshot> toKeep) {
+        for (CompanionSnapshot snap : snapshots) {
+            if (snap != null) {
+                boolean shouldSpawn = shouldSpawnCompanion(snap, mode, currentServer);
+                if (shouldSpawn) {
+                    toSpawn.add(snap);
+                } else {
+                    toKeep.add(snap);
+                }
+            }
+        }
+    }
+
+    private boolean shouldSpawnCompanion(CompanionSnapshot snap, String mode, String currentServer) {
+        if (mode.equals(MODE_FOLLOW)) {
+            return true;
+        }
+        if (mode.equals(MODE_RETURN)) {
+            return snap.getSourceServerId() == null || snap.getSourceServerId().equalsIgnoreCase(currentServer);
+        }
+        return false;
+    }
+
+    private int executeMigrateQuery(Connection connection, String table, UUID oldUuid, UUID newUuid) throws SQLException {
+        String sql = UPDATE_SQL_PREFIX + table + MIGRATE_UUID_SQL;
+        try (PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setString(1, newUuid.toString());
+            stmt.setString(2, oldUuid.toString());
+            return stmt.executeUpdate();
+        }
+    }
+
+    public boolean migrateData(UUID oldUuid, UUID newUuid) throws SQLException {
+        if (oldUuid == null || newUuid == null) return false;
+        
+        try (Connection connection = getConnection()) {
+            // 1. Check if newUuid already has data in the main table (don't overwrite)
+            String checkSql = "SELECT uuid FROM " + tableName + WHERE_UUID_SQL;
+            try (PreparedStatement checkStmt = connection.prepareStatement(checkSql)) {
+                checkStmt.setString(1, newUuid.toString());
+                try (ResultSet rs = checkStmt.executeQuery()) {
+                    if (rs.next()) {
+                        return false; // Target UUID already has data
+                    }
+                }
+            }
+
+            connection.setAutoCommit(false);
+            try {
+                boolean migrated = executeMigrateQuery(connection, tableName, oldUuid, newUuid) > 0;
+                executeMigrateQuery(connection, inventoriesTable, oldUuid, newUuid);
+                executeMigrateQuery(connection, statisticsTable, oldUuid, newUuid);
+                executeMigrateQuery(connection, metadataTable, oldUuid, newUuid);
+                executeMigrateQuery(connection, companionsTable, oldUuid, newUuid);
+                executeMigrateQuery(connection, mapsTable, oldUuid, newUuid);
+                executeMigrateQuery(connection, gamemodeInventoriesTable, oldUuid, newUuid);
+
+                connection.commit();
+                return migrated;
+            } catch (SQLException e) {
+                connection.rollback();
+                throw e;
+            } finally {
+                connection.setAutoCommit(true);
+            }
+        }
+    }
+
+    public String getTableName() {
+        return tableName;
     }
 }

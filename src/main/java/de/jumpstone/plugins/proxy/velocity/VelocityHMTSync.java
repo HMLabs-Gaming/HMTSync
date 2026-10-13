@@ -26,12 +26,12 @@ public class VelocityHMTSync {
     public void onProxyInitialization(ProxyInitializeEvent event) {
         server.getChannelRegistrar().register(channel);
         server.getEventManager().register(this, new VelocityListener(this));
-        
+
         com.velocitypowered.api.command.CommandMeta meta = server.getCommandManager().metaBuilder("hmtsync")
                 .aliases("db")
                 .build();
         server.getCommandManager().register(meta, new VelocityUnlockCommand(this));
-        
+
         logger.info("hmt-sync has been enabled on Velocity!");
     }
 

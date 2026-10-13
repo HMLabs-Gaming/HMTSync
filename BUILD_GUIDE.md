@@ -13,6 +13,7 @@ mvn clean package -Pspigot
 This creates: `target/hmt-sync-1.0.3-spigot.jar`
 
 **Use this JAR for:**
+
 - Spigot servers
 - Paper servers
 - Any Bukkit-compatible server
@@ -26,6 +27,7 @@ mvn clean package -Pvelocity
 This creates: `target/hmt-sync-1.0.3-velocity.jar`
 
 **Use this JAR for:**
+
 - Velocity proxy servers
 
 ### 3. Building for BungeeCord Proxies
@@ -37,6 +39,7 @@ mvn clean package -Pbungee
 This creates: `target/hmt-sync-1.0.3-bungee.jar`
 
 **Use this JAR for:**
+
 - BungeeCord proxy servers
 - Waterfall servers
 
@@ -53,11 +56,13 @@ This creates: `target/hmt-sync-1.0.3-universal.jar`
 ## Deployment Instructions
 
 ### For Game Servers (Spigot/Paper):
+
 1. Build using `-Pspigot` profile
 2. Copy `hmt-sync-*-spigot.jar` to your server's `plugins/` folder
 3. Restart the server
 
 ### For Proxy Servers:
+
 1. **For Velocity:** Build using `-Pvelocity` profile
 2. **For BungeeCord:** Build using `-Pbungee` profile
 3. Copy the appropriate JAR to your proxy's `plugins/` folder
@@ -70,6 +75,7 @@ This creates: `target/hmt-sync-1.0.3-universal.jar`
 This error occurs when you try to load a Bukkit-formatted plugin on Velocity, or vice versa.
 
 **Solution:**
+
 - Make sure you're using the correct build profile for your platform
 - Don't use the universal JAR on production servers
 - Check that you built with the correct Maven profile
@@ -94,7 +100,7 @@ jar -tf target/hmt-sync-*-velocity.jar | grep -E "(plugin\.yml|bungee\.yml)"
 The hybrid approach requires different metadata files because:
 
 - **Spigot/Paper** uses `plugin.yml` format
-- **BungeeCord** uses `bungee.yml` format  
+- **BungeeCord** uses `bungee.yml` format
 - **Velocity** uses annotation-based plugin definition (no YAML file needed)
 
 Each platform's loader checks for its specific metadata format, which is why mixing them causes loading errors.

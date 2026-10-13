@@ -1,5 +1,5 @@
 main: de.jumpstone.plugins.HMTSync
-version: 1.0.0
+version: 1.0.1
 name: HMTSync
 author: jumpstone
 api-version: "26.3"

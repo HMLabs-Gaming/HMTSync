@@ -1,6 +1,6 @@
-# Release Notes - v2.2.3
+# Release Notes - v1.0.1
 
-**HMT Sync v2.2.3** - **Minecraft 26.3 Compatibility & Hybrid Platform Support**
+**HMT Sync v1.0.1** - **Minecraft 26.3 Compatibility & Hybrid Platform Support**
 
 This release rebrands the plugin from *MC Data Bridge* to **HMT Sync** and adds
 first-class support for Minecraft 26.3, Redis-backed caching, and hybrid builds

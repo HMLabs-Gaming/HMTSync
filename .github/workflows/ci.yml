@@ -19,13 +19,13 @@ jobs:
         # Build each profile separately. The clean build prevents platform metadata
         # from one profile leaking into another profile's JAR.
         mvn -B clean package -DskipTests -Pspigot
-        cp target/example-plugin-*-spigot.jar release-build/
+        cp target/hmt-sync-*-spigot.jar release-build/
 
         mvn -B clean package -DskipTests -Pvelocity
-        cp target/example-plugin-*-velocity.jar release-build/
+        cp target/hmt-sync-*-velocity.jar release-build/
 
         mvn -B clean package -DskipTests -Puniversal
-        cp target/example-plugin-*-universal.jar release-build/
+        cp target/hmt-sync-*-universal.jar release-build/
 
       artifact-paths: |
         release-build/*.jar

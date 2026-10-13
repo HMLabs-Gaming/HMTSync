@@ -20,9 +20,7 @@ jobs:
         pom_version="$(mvn -q -DforceStdout help:evaluate -Dexpression=project.version)"
         mkdir -p release-build
 
-        # The Maven Shade configuration currently emits target/hmt-sync-${pom_version}.jar
-        # (the <finalName> values in the profiles do not rename that output).
-        # Copy it immediately after each profile build, before the next clean removes it.
+        # Maven currently emits target/hmt-sync-${pom_version}.jar; copy it after each profile build.
         mvn -B clean package -DskipTests -Pspigot
         cp "target/hmt-sync-${pom_version}.jar" "release-build/hmt-sync-${version}-spigot.jar"
 
@@ -36,7 +34,7 @@ jobs:
 
       hangar-project-slug: HMTSync
       hangar-channel: Release
-      # Do not upload the JAR to Hangar; link to the universal asset on GitHub Releases.
-      # {tag} and {version} are expanded by the reusable workflow.
+      # Publish an external GitHub Release URL rather than uploading the JAR to Hangar.
       hangar-files: '[{"platforms":["PAPER","VELOCITY"],"url":true,"externalUrl":"https://github.com/TitanSMP/HMTSync/releases/download/{tag}/hmt-sync-{version}-universal.jar"}]'
-    secrets: inherit
+    secrets:
+      HANGAR_API_TOKEN: ${{ secrets.HANGAR_API_TOKEN }}

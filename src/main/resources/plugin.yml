@@ -1,8 +1,8 @@
 main: de.jumpstone.plugins.HMTSync
-version: 2.2.3
+version: 1.0.0
 name: HMTSync
 author: jumpstone
-api-version: '26.3'
+api-version: "26.3"
 folia-supported: true
 softdepend: [FastLogin, AuthMe]
 permissions:

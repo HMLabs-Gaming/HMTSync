@@ -1,11 +1,18 @@
-# Release Notes - v2.1.1
+# Release Notes - v2.2.3
 
-**MC Data Bridge v2.1.1** - **Critical Bug Fix & Stability Update**
+**HMT Sync v2.2.3** - **Minecraft 26.3 Compatibility & Hybrid Platform Support**
 
-This patch release addresses a critical issue reported where players with boosted health (e.g., via Health Boost potion effects or attributes) were being kicked upon switching servers.
+This release rebrands the plugin from *MC Data Bridge* to **HMT Sync** and adds
+first-class support for Minecraft 26.3, Redis-backed caching, and hybrid builds
+for Paper/Spigot, BungeeCord, and Velocity.
 
 ---
 
-### 🐛 Bug Fixes
-*   **Fixed Kick on Server Switch with High Health:** Resolved an issue where players with health greater than 20.0 (Health Boost) would be kicked with an `IllegalArgumentException`. The plugin now safely handles this by loading potions and attributes from the database before setting the max health attribute.
+### ✨ Features
+*   **Minecraft 26.3 Support:** Updated to Paper API `26.3.build.42-alpha`, targeting Minecraft 26.3 (Java 25). Plugin metadata now declares `api-version: '26.3'`.
+*   **Hybrid Builds:** Separate build profiles produce dedicated JARs for Spigot/Paper (`-spigot`), Velocity (`-velocity`), and BungeeCord (`-bungee`).
+*   **Redis Integration:** Hybrid Redis-MySQL caching layer to reduce database load and speed up cross-server synchronization.
+*   **Economy & Playtime Sync:** Optional synchronization of economy balances and playtime across servers.
 
+### 🐛 Bug Fixes
+*   **Fixed Kick on Server Switch with High Health:** Players with health greater than 20.0 (Health Boost) are no longer kicked with an `IllegalArgumentException`. Potions and attributes are loaded before the max-health attribute is applied.

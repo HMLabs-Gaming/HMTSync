@@ -1,23 +1,28 @@
-name: Build and Test
+name: Build, Test and Release
 
 on:
   push:
     branches: ["main"]
   pull_request:
     branches: ["main"]
+  release:
+    types: [published]
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # Build + Test on every push to main and on every pull request.
+  # ---------------------------------------------------------------------------
   build-and-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Set up JDK 21
-        uses: actions/setup-java@v3
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
         with:
-          java-version: "21"
+          java-version: "25"
           distribution: "temurin"
           cache: maven
 
@@ -26,7 +31,8 @@ jobs:
         run: |
           # --- Configuration ---
           PLUGIN_YML="src/main/resources/plugin.yml"
-          BUNGEE_YML="src/main/resources/bungee.yml"
+          PURPUR_YML="src/main/resources/purpur.yml"
+          VELOCITY_JSON="src/main/resources/velocity-plugin.json"
           RELEASE_NOTES_FILE="release-notes.md"
 
           # 1. Get POM Version and Check for SNAPSHOT suffix
@@ -48,19 +54,30 @@ jobs:
           # 2. Check YML files
           check_yml_version() {
             local file_path=$1
-            # Use grep to find the line starting with 'version:', then cut/awk to get the value.
-            # tr -d ' "' removes spaces and quotes.
-            YML_VERSION=$(grep "^version:" "$file_path" | awk '{print $2}' | tr -d '"[:space:]')
-            if [[ "$YML_VERSION" != "$POM_VERSION" ]]; then
-              echo "::error file=$file_path::Version mismatch. POM: $POM_VERSION, $file_path: $YML_VERSION. Must match POM version exactly."
+            local yml_version
+            yml_version=$(grep "^version:" "$file_path" | awk '{print $2}' | tr -d '"[:space:]')
+            if [[ "$yml_version" != "$POM_VERSION" ]]; then
+              echo "::error file=$file_path::Version mismatch. POM: $POM_VERSION, $file_path: $yml_version. Must match POM version exactly."
               exit 1
             fi
             echo "✅ $file_path Check: Version matches POM."
           }
 
-          # Run the checks
+          # 2.1 Check the Velocity JSON descriptor
+          check_json_version() {
+            local file_path=$1
+            local json_version
+            json_version=$(grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]*"' "$file_path" | head -1 | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/')
+            if [[ "$json_version" != "$POM_VERSION" ]]; then
+              echo "::error file=$file_path::Version mismatch. POM: $POM_VERSION, $file_path: $json_version. Must match POM version exactly."
+              exit 1
+            fi
+            echo "✅ $file_path Check: Version matches POM."
+          }
+
           check_yml_version "$PLUGIN_YML"
-          check_yml_version "$BUNGEE_YML"
+          check_yml_version "$PURPUR_YML"
+          check_json_version "$VELOCITY_JSON"
 
           # 3. Check that Release Notes mentions the new version
           if ! grep -Fq "$POM_VERSION" "$RELEASE_NOTES_FILE"; then
@@ -69,71 +86,88 @@ jobs:
           fi
           echo "✅ $RELEASE_NOTES_FILE Check: Contains version $POM_VERSION."
 
-
-          echo "All pre-release metadata checks passed. Ready for final build."
+          echo "All pre-release metadata checks passed."
 
       - name: Build with Maven
         run: mvn -B verify --file pom.xml
 
+  # ---------------------------------------------------------------------------
+  # Release: triggered when a GitHub release is published.
+  # Rebuilds the Paper and Velocity JARs from the tagged commit, attaches them
+  # to the GitHub release and uploads each to Paper Hangar under its platform.
+  # ---------------------------------------------------------------------------
   release:
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: github.event_name == 'release'
     needs: build-and-test
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v3
+      - name: Checkout Code (tag of the release)
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.RELEASE_TOKEN }}
 
-      - name: Set up JDK 21
-        uses: actions/setup-java@v3
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
         with:
-          java-version: "21"
+          java-version: "25"
           distribution: "temurin"
           cache: maven
 
-      - name: Get Project Version
+      - name: Resolve and verify version
         id: version
-        run: echo "VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)" >> $GITHUB_OUTPUT
-
-      - name: Build Final Release JAR
-        run: mvn -B clean package -DskipTests
-
-      - name: Create Git Tag
         run: |
-          TAG_NAME="v${{ steps.version.outputs.VERSION }}"
-          echo "Creating Git tag $TAG_NAME"
-          # Configure git for pushing
-          git config user.name github-actions
-          git config user.email github-actions@github.com
-          git tag $TAG_NAME
-          # Use explicit token auth to ensure the PAT is used for the push
-          git push "https://x-access-token:${{ secrets.RELEASE_TOKEN }}@github.com/${{ github.repository }}.git" $TAG_NAME
+          set -euo pipefail
+          TAG="${{ github.event.release.tag_name }}"
+          VERSION="${TAG#v}"
+          POM_VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
+          if [ "$VERSION" != "$POM_VERSION" ]; then
+            echo "::error::Release tag '$TAG' (=> '$VERSION') does not match the pom.xml version '$POM_VERSION'."
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Create GitHub Release
-        id: create_release
-        uses: softprops/action-gh-release@v1
+      - name: Build release JARs (Paper, Velocity)
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for PROFILE in spigot velocity; do
+            echo "::group::Building profile $PROFILE"
+            mvn -B clean package -DskipTests -P"$PROFILE"
+            cp "target/hmt-sync-${{ steps.version.outputs.VERSION }}-${PROFILE}.jar" dist/
+            echo "::endgroup::"
+          done
+          ls -la dist/
+
+      - name: Attach JARs to GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ steps.version.outputs.VERSION }}
-          name: mc-data-bridge v${{ steps.version.outputs.VERSION }}
-          files: target/mc-data-bridge-${{ steps.version.outputs.VERSION }}.jar
-          body_path: release-notes.md
+          tag_name: ${{ github.event.release.tag_name }}
+          files: dist/*.jar
+          fail_on_unmatched_files: true
 
-      - name: Prepare for Next Snapshot
-        run: |
-          CURRENT_VERSION="${{ steps.version.outputs.VERSION }}"
-          SNAPSHOT_VERSION="${CURRENT_VERSION}-SNAPSHOT"
-
-          # Set pom.xml to next SNAPSHOT version
-          echo "Setting pom.xml to $SNAPSHOT_VERSION for next development iteration."
-          mvn versions:set -DnewVersion=$SNAPSHOT_VERSION -DgenerateBackupPoms=false
-
-          # Commit the snapshot change back to main
-          git config user.name github-actions
-          git config user.email github-actions@github.com
-          git commit -am "Prepare for next development iteration ($SNAPSHOT_VERSION) [skip ci]."
-          # Use explicit token auth for the commit push as well
-          git push "https://x-access-token:${{ secrets.RELEASE_TOKEN }}@github.com/${{ github.repository }}.git" HEAD:main
+      - name: Upload to Paper Hangar
+        uses: milkdrinkers/Hangar-Publish@v2
+        with:
+          api_token: ${{ secrets.HANGAR_API_TOKEN }}
+          slug: HMTSync
+          version: ${{ steps.version.outputs.VERSION }}
+          channel: Release
+          description: ${{ github.event.release.body }}
+          files: |
+            [
+              {
+                "path": "dist/hmt-sync-${{ steps.version.outputs.VERSION }}-spigot.jar",
+                "platforms": ["PAPER"]
+              },
+              {
+                "path": "dist/hmt-sync-${{ steps.version.outputs.VERSION }}-velocity.jar",
+                "platforms": ["VELOCITY"]
+              }
+            ]
+          platform_dependencies: |
+            {
+              "PAPER": [">=26.3"],
+              "VELOCITY": [">=3.1.0"]
+            }

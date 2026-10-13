@@ -1,73 +1,98 @@
 # HMT Sync
 
-Optimized fork of `MC Data Bridge` for the HMT Network.
-
-# MC Data Bridge
-
 ![Minecraft Version](https://img.shields.io/badge/Minecraft-26.3-blue?style=for-the-badge&logo=minecraft)
-![Platform](https://img.shields.io/badge/Platform-Paper%20%7C%20Bungee%20%7C%20Velocity-brightgreen?style=for-the-badge)
-[![Modrinth Downloads](https://img.shields.io/modrinth/dt/mc-data-bridge?style=for-the-badge&logo=modrinth&label=Modrinth)](https://modrinth.com/plugin/mc-data-bridge)
-[![Spigot Downloads](https://img.shields.io/spiget/downloads/128642?style=for-the-badge&logo=spigotmc&label=Spigot&color=orange)](https://www.spigotmc.org/resources/128642)
+![Platform](https://img.shields.io/badge/Platform-Paper%20%7C%20Velocity-brightgreen?style=for-the-badge)
+![Java](https://img.shields.io/badge/Java-25-orange?style=for-the-badge&logo=openjdk&logoColor=white)
+[![GitHub Release](https://img.shields.io/github/v/release/TitanSMP/HMTSync?style=for-the-badge&logo=github)](https://github.com/TitanSMP/HMTSync/releases)
+[![Hangar](https://img.shields.io/badge/Hangar-HMTSync-blue?style=for-the-badge)](https://hangar.papermc.io/HMLabs-Gaming/HMTSync)
 
-MC Data Bridge is a robust, high-performance hybrid plugin for PaperMC (Spigot), BungeeCord, and Velocity. It is designed to seamlessly synchronize player data across multiple Minecraft servers, ensuring that players have a consistent experience by retaining their health, hunger, experience, inventory, and more as they move between linked servers.
+HMT Sync is a robust, high-performance plugin for **PaperMC (Spigot)** servers and the **Velocity** proxy. It synchronizes player data across multiple Minecraft servers, ensuring a consistent experience by retaining health, hunger, experience, inventory, and more as players move between linked servers.
+
+> Originally forked from *MC Data Bridge*, maintained for the HMT Network.
 
 ## Compatibility
 
-- **Minecraft Version:** `26.3` (Paper `26.3.build.42-alpha`)
+- **Minecraft Version:** `26.3` (built against Paper `26.3.build.42-alpha`)
 - **Java:** 25
 - **Server Platforms:** PaperMC (or forks like Purpur), Spigot
-- **Proxy Platforms:** BungeeCord, Velocity
+- **Proxy Platform:** Velocity
 
-This plugin is a hybrid build and the same JAR file works on all supported platforms.
+Separate JARs are shipped for each platform:
+
+| JAR | Platform |
+| --- | --- |
+| `hmt-sync-<version>-spigot.jar` | Paper / Spigot backends |
+| `hmt-sync-<version>-velocity.jar` | Velocity proxy |
+
+The backend and proxy JARs share the same codebase but contain platform-specific plugin metadata.
 
 ## Features
 
-- **Hybrid Plugin:** A single JAR file works on your PaperMC/Spigot servers and your BungeeCord/Velocity proxy, automatically activating the correct functionality for each platform.
-- **Proxy-Initiated Saves:** The proxy (BungeeCord/Velocity) orchestrates the data saving process, ensuring that a player's data is saved from their source server _before_ they connect to the destination server. This eliminates race conditions and ensures data is never lost during a server switch.
-- **Fully Asynchronous:** All database operations are performed on a separate thread, ensuring that your server's main thread is never blocked. This means no lag, even if your database is slow to respond.
-- **Robust Locking Mechanism:** A database-level locking mechanism with an automatic timeout prevents data corruption and ensures that only one server can write a player's data at a time.
-- **Version-Independent Item Serialization:** Player inventories are serialized using Minecraft's built-in Base64 methods, which is highly robust and prevents data loss when you update your Minecraft server to a new version.
-- **Cross-Server Player Data Sync:** Synchronizes core player data including:
-  - Health
-  - Food Level & Saturation
-  - Experience (Total XP, current XP, and Level)
-  - Inventory Contents
-  - Armor Contents
-  - Active Potion Effects
-  - **Ender Chest Contents**
-  - **Advancements & Recipes**
-- **Resilient Connection Pooling:** Uses HikariCP with optimized settings to ensure that the database connection is resilient to network issues and database restarts.
-- **Granular Sync Control**: Enable or disable synchronization for any specific data type via `config.yml`.
-- **Server/World Blacklist**: Prevent synchronization on specific servers or worlds.
-- **Configurable Table Names**: Set a custom prefix for database tables to avoid conflicts.
-- **Configurable & Flexible:** Easily connect to your MySQL database and configure settings for your server environment.
+- **Proxy-Initiated Saves:** The proxy orchestrates the save process, ensuring a player's data is saved from their source server _before_ they connect to the destination server. This eliminates race conditions and prevents data loss during a server switch.
+- **Fully Asynchronous:** All database operations run on separate threads, so the server's main thread is never blocked — no lag even if the database is slow.
+- **Robust Locking Mechanism:** A database-level locking mechanism with version-based fencing and an automatic timeout prevents data corruption and ensures only one server can write a player's data at a time.
+- **Version-Independent Item Serialization:** Inventories are serialized using Minecraft's built-in Base64 methods, preventing data loss across Minecraft updates.
+- **Redis Hybrid Cache (optional):** A short-lived Redis mirror of the player payload lets a server hand data back without an immediate SQL read. SQL stays authoritative; locking and fencing never move to Redis.
+- **Cross-Server Player Data Sync:**
+  - Health & max-health attributes
+  - Food level & saturation
+  - Experience (total XP, current XP, level)
+  - Inventory, armor & ender chest contents
+  - Active potion effects
+  - Advancements, recipes & statistics
+  - Flight & gamemode, including gamemode-specific inventories
+  - Persistent data container (PDC) values
+  - Maps (cross-server map synchronization)
+  - Companions / tamed pets
+- **Economy & Playtime Bridges (optional):** Sync balances (Vault + an economy provider) and playtime (EssentialsX) across the network.
+- **Resilient Connection Pooling:** Uses HikariCP with optimized settings to survive network issues and database restarts.
+- **MySQL or SQLite:** Use a shared MySQL/MariaDB database for a network, or a local SQLite file.
+- **Granular Sync Control:** Enable or disable synchronization per data type via `config.yml`.
+- **Server/World Blacklist:** Prevent synchronization on specific servers or worlds.
+- **Admin Tools:** In-game inspector GUI (read-only and edit modes), manual lock release, and data migration commands.
+- **Security:** SHA-256 data integrity verification and salted HMAC identity hashing with legacy fallback.
+- **Metrics:** Optional embedded Prometheus metrics exporter.
 
 ## Installation
 
-1.  **Build the Plugin:**
-    - Navigate to the plugin's root directory in your terminal.
-    - Run `mvn clean package` to build the plugin.
-    - The compiled JAR file (`mc-data-bridge-*.jar`) will be located in the `target/` directory.
-    - **Note**: Development builds will end in `-SNAPSHOT`. Release builds (from the `main` branch tags) will just be the version number.
-2.  **Deploy to Servers:**
-    - Copy the single `mc-data-bridge-*.jar` file into the `plugins/` folder of **each PaperMC server** you wish to synchronize.
-    - Copy the **same JAR file** into the `plugins/` folder of your **BungeeCord or Velocity proxy server**.
+### From a release
+
+1. **Download** the matching JAR from [GitHub Releases](https://github.com/TitanSMP/HMTSync/releases) or [Hangar](https://hangar.papermc.io/HMLabs-Gaming/HMTSync).
+2. **Backends:** Copy `hmt-sync-<version>-spigot.jar` into the `plugins/` folder of **each Paper/Spigot server**.
+3. **Proxy:** Copy `hmt-sync-<version>-velocity.jar` into the `plugins/` folder of your **Velocity proxy**.
+4. **Configure** `config.yml` on each backend (see below), then restart the proxy and all servers.
+
+### Building from source
+
+Requires **JDK 25** and **Maven 3.9+**.
+
+```bash
+# Backend (Paper/Spigot)
+mvn clean package -Pspigot
+# -> target/hmt-sync-<version>-spigot.jar
+
+# Proxy (Velocity)
+mvn clean package -Pvelocity
+# -> target/hmt-sync-<version>-velocity.jar
+```
+
+Development builds end in `-SNAPSHOT`; release builds use the plain version number.
 
 ---
 
 ## 🛠 Technical Deep Dive
 
-MC Data Bridge is built with a **Security-First** approach to player state. Unlike traditional sync plugins that rely on simple "Save-on-Quit," this plugin utilizes a Proxy-orchestrated handshake to eliminate data loss and duplication exploits.
+HMT Sync takes a **Security-First** approach to player state. Unlike plugins that rely on simple "Save-on-Quit", it uses a proxy-orchestrated handshake to eliminate data loss and duplication exploits.
 
 ### 1. The Secure Handshake (Happy Path)
 
-The Proxy (Bungee/Velocity) acts as the coordinator. It ensures the Source Server has successfully committed data to the MySQL database and released its lock before the Destination Server is even allowed to request it.
+The proxy acts as coordinator. It ensures the source server has committed data to the database and released its lock before the destination server is allowed to request it.
 
 ```mermaid
 sequenceDiagram
     autonumber
     actor User
-    participant P as Proxy (Velocity/Bungee)
+    participant P as Proxy (Velocity)
     participant S1 as Source Server
     participant DB as MySQL Database
     participant S2 as Destination Server
@@ -105,7 +130,7 @@ sequenceDiagram
 
 ### 2. Anti-Duplication & Race Condition Protection
 
-By using a **Database-Level Locking Mechanism**, we prevent the "Double-Login" exploit. If a player somehow exists on two servers simultaneously, the second server will be denied access to the data until the first server safely disconnects.
+A database-level lock prevents the "double-login" exploit. If a player somehow exists on two servers at once, the second server is denied access until the first safely disconnects.
 
 ```mermaid
 sequenceDiagram
@@ -124,7 +149,7 @@ sequenceDiagram
 
 ### 3. Crash Resilience & Auto-Recovery
 
-If a backend server crashes, the player's data lock might remain "Stuck." MC Data Bridge handles this gracefully via a configurable `lock-timeout` (Default: 60s). This ensures players aren't permanently locked out of the network while maintaining a safe window for the database to settle.
+If a backend crashes, a player's lock might remain stuck. HMT Sync handles this via a configurable `lock-timeout` (default: 60s), so players aren't permanently locked out.
 
 ```mermaid
 stateDiagram-v2
@@ -142,67 +167,53 @@ stateDiagram-v2
     Expired --> Locked : New Server Claims Lock\n(Steal Lock)
 ```
 
+---
+
 ## Configuration
 
-A `config.yml` file will be generated in the `plugins/mc-data-bridge/` folder on your PaperMC servers after the first run. You must update this file with your database credentials and a unique server ID.
+A `config.yml` file is generated in `plugins/HMTSync/` on each backend after the first run. You must set your database credentials and a **unique `server-id` per server**. The proxy does not need a `server-id`.
 
 ```yaml
-# MySQL Database Configuration
 database:
+  # "mysql" (MySQL/MariaDB) or "sqlite" (local file)
+  type: mysql
   host: localhost
   port: 3306
   database: minecraft
   username: user
   password: password
+  sqlite-file: "player_data.db"
 
-  # A list of JDBC properties to apply.
-  # This is where you would enable SSL (e.g., useSSL: true)
+  # "json" (Base64 NBT, compatible) or "binary" (compressed, recommended for production)
+  serialization-format: "json"
+
   properties:
     useSSL: false
     allowPublicKeyRetrieval: true
 
-  # HikariCP Connection Pool Settings
   pool-settings:
     maximum-pool-size: 10
     minimum-idle: 10
-    max-lifetime: 1800000 # 30 minutes
-    connection-timeout: 5000 # 5 seconds
-    idle-timeout: 600000 # 10 minutes
+    max-lifetime: 1800000
+    connection-timeout: 5000
+    idle-timeout: 600000
 
-  # MySQL JDBC Optimizations
-  optimizations:
-    cache-prep-stmts: true
-    prep-stmt-cache-size: 250
-    prep-stmt-cache-sql-limit: 2048
-    use-server-prep-stmts: true
-    use-local-session-state: true
-    rewrite-batched-statements: true
-    cache-result-set-metadata: true
-    cache-server-configuration: true
-    elide-set-auto-commits: true
-    maintain-time-stats: false
-
-# Set to true to enable verbose debugging messages in the server console.
+# Verbose console logging.
 debug: false
 
-# A unique name for this server. This is CRITICAL for data locking.
-# Each server connected to the same database MUST have a unique name.
-# Example: "survival-1", "creative", "lobby"
-# Example: "survival-1", "creative", "lobby"
+# A unique name for this server. CRITICAL for data locking.
 server-id: "default-server"
 
-# Set to prefix the player_data table (e.g., 'mc_data_bridge_'). Leave empty for default.
+# Prefix for the player_data table. Leave empty for default.
 table-prefix: ""
 
-# The duration in milliseconds after which a player data lock is considered expired.
-# This prevents players from being permanently locked out if a server crashes.
-# Default: 60000 (1 minute)
+# Milliseconds before a data lock is considered expired.
 lock-timeout: 60000
 
-# Heartbeat interval for lock updates (seconds)
+# Heartbeat interval (seconds) for lock updates.
 lock-heartbeat-seconds: 30
 
-# Toggle specific data to sync
+# Granular sync toggles.
 sync-data:
   health: true
   food-level: true
@@ -211,38 +222,97 @@ sync-data:
   armor: true
   potion-effects: true
   ender-chest: false
-  location: false # Logging only
+  location: false
   advancements: false
+  statistics: false
+  pdc: false
+  flight-gamemode: false
+  companions: false
+  maps: false
+  separate-gamemode-inventories: false
+  economy: false
+  playtime: false
 
-# Blacklist servers/worlds from syncing
+# Skip synchronization on these servers/worlds.
 sync-blacklist:
   servers:
-    - "example-server"
+    - "example-blacklisted-server"
   worlds:
-    - "example_nether"
+    - "example_world_nether"
+
+# Optional Redis read-through cache (SQL stays authoritative).
+redis:
+  enabled: false
+  host: localhost
+  port: 6379
+  password: ""
+  timeout-ms: 2000
+  cache-duration-seconds: 300
+  storage-strategy: "mysql-only" # or "redis-mysql-hybrid"
+
+# Security.
+security:
+  log-uuid-mismatches: true
+  verify-data-integrity: true
+  seed: "change-me-to-a-long-random-string"
+
+# Identity handling.
+identity:
+  mode: PREMIUM # or HYBRID
+  auto-migrate-fastlogin: false
+  auto-migrate-authme: false
+
+# Companion / pet transfer.
+companions:
+  scan-radius: 32
+  mode: "follow" # follow | return | untracked
+
+# Optional Prometheus metrics exporter.
+metrics:
+  enabled: false
+  port: 8080
+  path: "/metrics"
 ```
 
-- **`database.*`**: Standard configuration for your MySQL database connection.
-- **`debug`**: Set to `true` to enable verbose debugging messages in the server console. Set to `false` for normal operation.
-- **`server-id` (Required):** You **must** set a unique name for each of your PaperMC/Spigot servers. This is critical for the data locking system to work correctly. The proxy server does not need this configuration.
-- **`lock-timeout`**: The time in milliseconds after which a data lock is considered expired. This prevents a player from being permanently locked if a server crashes while saving their data.
-- **`sync-data`**: Toggle specific features on/off. New features like `ender-chest` and `advancements` are disabled by default.
-- **`sync-blacklist`**: Define servers or worlds where synchronization should be skipped.
+Key options:
+
+- **`database.*`** — MySQL/MariaDB or SQLite connection, serialization format, HikariCP pool and JDBC tuning.
+- **`server-id` (required)** — must be unique for every backend sharing the database.
+- **`lock-timeout`** — time before a stale lock is stolen from a crashed server.
+- **`sync-data.*`** — enable/disable individual data components. Newer features (`ender-chest`, `advancements`, `statistics`, `maps`, `economy`, `playtime`, …) default to off.
+- **`sync-blacklist`** — servers/worlds excluded from synchronization.
+- **`redis`** — optional hybrid cache; the fence/lock always stays in SQL.
+- **`security`** — change `seed` to a long random string; it salts identity hashes and checksums.
+- **`identity`** — `PREMIUM` keeps UUIDs stable; `HYBRID` allows Cracked→Premium migrations (optionally automated via FastLogin/AuthMe).
+
+See [REDIS_INTEGRATION_GUIDE.md](REDIS_INTEGRATION_GUIDE.md) for Redis details and [BUILD_GUIDE.md](BUILD_GUIDE.md) for build troubleshooting.
 
 ## Commands
 
-- `/databridge unlock <player>` - Manually release a lock for a specific player (Permission: `databridge.admin`).
+Backends (permissions in parentheses):
 
-## Usage
+- `/hmtsync unlock <player>` — manually release a data lock (`hmtsync.admin`)
+- `/hmtsync inspect <player> [inventory|enderchest] [--edit]` — open the data inspector GUI (`hmtsync.inspect`; editing needs `hmtsync.inspect.edit`)
+- `/hmtsync invsee <player> [--edit]` — open a player's inventory (`hmtsync.inspect`)
+- `/hmtsync endersee <player> [--edit]` — open a player's ender chest (`hmtsync.inspect`)
+- `/hmtsync migrate <source> <target>` — migrate data between identities (`hmtsync.admin`)
+- `/hmtsync-debug <status|test-economy|test-playtime|test-enderchest>` — diagnostics (`hmtsync.admin`)
 
-1.  **Add the JAR:** Place the single `mc-data-bridge-*.jar` file into the `plugins/` folder of all your PaperMC servers AND your BungeeCord/Velocity proxy.
-2.  **Configure:** Edit the `config.yml` in each PaperMC server's `plugins/mc-data-bridge/` folder. **Set a unique `server-id` for each server.**
-3.  **Restart Servers:** Restart your proxy and all backend Minecraft servers.
-4.  **Enjoy!** Players can now seamlessly switch between your linked servers, and their data will be synchronized automatically and safely.
+Proxy (Velocity):
+
+- `/hmtsync unlock <player>` — release a lock from the proxy
+
+## Permissions
+
+| Permission | Default | Description |
+| --- | --- | --- |
+| `hmtsync.admin` | op | Admin commands and debug tools |
+| `hmtsync.inspect` | op | View-only inspection of player data and inventories |
+| `hmtsync.inspect.edit` | op | Interactive editing of player data and inventories |
 
 ## Important Notes
 
-- **Database Requirement:** This plugin requires a **MySQL or MariaDB database** to function.
-- **Security Best Practice:** For production servers, it is strongly recommended to create a dedicated MySQL user for this plugin with limited permissions. The user only needs `SELECT`, `INSERT`, `UPDATE`, `CREATE`, and `ALTER` on the specified database.
-- **Connectivity & Firewalls:** Ensure your Minecraft servers and proxy can open a network connection to your database's `host` and `port`.
-- **Automatic Schema:** The plugin will automatically create and update the `player_data` table in your database. The schema includes `uuid`, `data`, `is_locked`, `locking_server`, `lock_timestamp`, and `last_updated`.
+- **Database Requirement:** A shared **MySQL/MariaDB** database is recommended for a network; SQLite is supported for local use.
+- **Security Best Practice:** Create a dedicated MySQL user with only `SELECT`, `INSERT`, `UPDATE`, `CREATE`, and `ALTER` on the target database, and set a strong `security.seed`.
+- **Connectivity & Firewalls:** Backends and the proxy must be able to reach the database host/port.
+- **Automatic Schema:** The plugin creates and updates the `player_data` table automatically. The schema includes `uuid`, `data`, `is_locked`, `locking_server`, `lock_timestamp`, `lock_version`, and `last_updated`.

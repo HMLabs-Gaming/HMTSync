@@ -8,7 +8,7 @@ import com.velocitypowered.api.event.Subscribe;
 import com.velocitypowered.api.event.proxy.ProxyInitializeEvent;
 import com.velocitypowered.api.proxy.messages.MinecraftChannelIdentifier;
 
-@Plugin(id = "hmt-sync", name = "HMT Sync", version = "2.2.3", authors = {
+@Plugin(id = "hmt-sync", name = "HMT Sync", version = "1.0.1", authors = {
         "jumpstone" })
 public class VelocityHMTSync {
 

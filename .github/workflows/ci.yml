@@ -99,6 +99,12 @@ jobs:
           mvn -B clean package -DskipTests -Pvelocity
           cp target/hmt-sync-*-velocity.jar dist/
 
+      - name: Build universal JAR (Paper + Velocity)
+        run: |
+          set -euo pipefail
+          mvn -B clean package -DskipTests -Puniversal
+          cp target/hmt-sync-*-universal.jar dist/
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v7
         with:

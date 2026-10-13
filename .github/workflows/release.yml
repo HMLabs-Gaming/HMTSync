@@ -7,8 +7,9 @@ on:
 jobs:
   # ---------------------------------------------------------------------------
   # Release: triggered when a GitHub release is published.
-  # Rebuilds (and tests) the Paper and Velocity JARs from the tagged commit,
-  # attaches them to the GitHub release and uploads each to Paper Hangar.
+  # Rebuilds (and tests) the Paper, Velocity and Universal JARs from the tagged
+  # commit and attaches all three to the GitHub release. Hangar only links the
+  # single universal JAR (for both PAPER and VELOCITY).
   # ---------------------------------------------------------------------------
   release:
     runs-on: ubuntu-latest
@@ -40,7 +41,7 @@ jobs:
           fi
           echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Build release JARs (Paper with tests, Velocity)
+      - name: Build release JARs (Paper with tests, Velocity, Universal)
         run: |
           set -euo pipefail
           mkdir -p dist
@@ -51,6 +52,10 @@ jobs:
           echo "::group::Building profile velocity"
           mvn -B clean package -DskipTests -Pvelocity
           cp "target/hmt-sync-${{ steps.version.outputs.VERSION }}-velocity.jar" dist/
+          echo "::endgroup::"
+          echo "::group::Building profile universal"
+          mvn -B clean package -DskipTests -Puniversal
+          cp "target/hmt-sync-${{ steps.version.outputs.VERSION }}-universal.jar" dist/
           echo "::endgroup::"
           ls -la dist/
 
@@ -78,17 +83,13 @@ jobs:
           description: ${{ github.event.release.body }}
           # External files: Hangar only stores a download link (25 MiB nginx / 10 MB per-file upload limit).
           # The JARs are attached to the GitHub Release in the step above, so these URLs must resolve.
+          # A single universal JAR is linked for both PAPER and VELOCITY (it carries every descriptor).
           files: |
             [
               {
                 "url": true,
-                "externalUrl": "https://github.com/TitanSMP/HMTSync/releases/download/${{ github.event.release.tag_name }}/hmt-sync-${{ steps.version.outputs.VERSION }}-spigot.jar",
-                "platforms": ["PAPER"]
-              },
-              {
-                "url": true,
-                "externalUrl": "https://github.com/TitanSMP/HMTSync/releases/download/${{ github.event.release.tag_name }}/hmt-sync-${{ steps.version.outputs.VERSION }}-velocity.jar",
-                "platforms": ["VELOCITY"]
+                "externalUrl": "https://github.com/TitanSMP/HMTSync/releases/download/${{ github.event.release.tag_name }}/hmt-sync-${{ steps.version.outputs.VERSION }}-universal.jar",
+                "platforms": ["PAPER", "VELOCITY"]
               }
             ]
           platform_dependencies: |

@@ -10,7 +10,7 @@ This guide explains how to build the HMT Sync plugin for different Minecraft ser
 mvn clean package -Pspigot
 ```
 
-This creates: `target/hmt-sync-1.0.1-spigot.jar`
+This creates: `target/hmt-sync-1.0.2-spigot.jar`
 
 **Use this JAR for:**
 - Spigot servers
@@ -23,7 +23,7 @@ This creates: `target/hmt-sync-1.0.1-spigot.jar`
 mvn clean package -Pvelocity
 ```
 
-This creates: `target/hmt-sync-1.0.1-velocity.jar`
+This creates: `target/hmt-sync-1.0.2-velocity.jar`
 
 **Use this JAR for:**
 - Velocity proxy servers
@@ -34,7 +34,7 @@ This creates: `target/hmt-sync-1.0.1-velocity.jar`
 mvn clean package -Pbungee
 ```
 
-This creates: `target/hmt-sync-1.0.1-bungee.jar`
+This creates: `target/hmt-sync-1.0.2-bungee.jar`
 
 **Use this JAR for:**
 - BungeeCord proxy servers
@@ -46,7 +46,7 @@ This creates: `target/hmt-sync-1.0.1-bungee.jar`
 mvn clean package -Puniversal
 ```
 
-This creates: `target/hmt-sync-1.0.1-universal.jar`
+This creates: `target/hmt-sync-1.0.2-universal.jar`
 
 **Warning:** This JAR contains all metadata files and should only be used for development/testing. It may cause conflicts on production servers.
 

@@ -34,7 +34,7 @@ jobs:
 
       hangar-project-slug: HMTSync
       hangar-channel: Release
-      hangar-platform-dependencies: '{"PAPER":["26.3"],"VELOCITY":[">=3.1.0 <=4.2.1"]}'
+      hangar-platform-dependencies: '{}'
       hangar-files: '[{"platforms":["PAPER","VELOCITY"],"url":true,"externalUrl":"https://github.com/TitanSMP/HMTSync/releases/download/{tag}/hmt-sync-{version}-universal.jar"}]'
     secrets:
       HANGAR_API_TOKEN: ${{ secrets.HANGAR_API_TOKEN }}

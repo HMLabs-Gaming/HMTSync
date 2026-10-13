@@ -1,107 +1,41 @@
-name: Release
-
+# Caller example: copy to the consuming plugin repository at .github/workflows/release.yml.
+# Multi-JAR example for plugins that build distinct Spigot, Velocity, and universal artifacts.
+# Keep only the profiles/artifacts that your plugin really supports.
+name: Multi-JAR Plugin Release
 on:
   release:
     types: [published]
 
+permissions:
+  contents: write
+
 jobs:
-  # ---------------------------------------------------------------------------
-  # Release: triggered when a GitHub release is published.
-  # Rebuilds (and tests) the Paper, Velocity and Universal JARs from the tagged
-  # commit and attaches all three to the GitHub release. Hangar only links the
-  # single universal JAR (for both PAPER and VELOCITY).
-  # ---------------------------------------------------------------------------
   release:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout Code (tag of the release)
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
+    uses: HMLabs-Gaming/release-workflows/.github/workflows/release-artifacts.yml@main
+    with:
+      project-slug: hmt-sync
+      java-version: "25"
+      build-command: |
+        set -Eeuo pipefail
+        version="${GITHUB_REF_NAME#v}"
+        mkdir -p release-build
 
-      - name: Set up JDK 25
-        uses: actions/setup-java@v6
-        with:
-          java-version: "25"
-          distribution: "temurin"
-          cache: maven
+        # Build each profile separately. The clean build prevents platform metadata
+        # from one profile leaking into another profile's JAR.
+        mvn -B clean package -DskipTests -Pspigot
+        cp "target/hmt-sync-${version}-spigot.jar" "release-build/example-plugin-${version}-spigot.jar"
 
-      - name: Resolve and verify version
-        id: version
-        run: |
-          set -euo pipefail
-          TAG="${{ github.event.release.tag_name }}"
-          VERSION="${TAG#v}"
-          POM_VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
-          if [ "$VERSION" != "$POM_VERSION" ]; then
-            echo "::error::Release tag '$TAG' (=> '$VERSION') does not match the pom.xml version '$POM_VERSION'."
-            exit 1
-          fi
-          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+        mvn -B clean package -DskipTests -Pvelocity
+        cp "target/hmt-sync-${version}-velocity.jar" "release-build/example-plugin-${version}-velocity.jar"
 
-      - name: Build release JARs (Paper with tests, Velocity, Universal)
-        run: |
-          set -euo pipefail
-          mkdir -p dist
-          echo "::group::Building profile spigot (tests enabled)"
-          mvn -B verify -Pspigot
-          cp "target/hmt-sync-${{ steps.version.outputs.VERSION }}-spigot.jar" dist/
-          echo "::endgroup::"
-          echo "::group::Building profile velocity"
-          mvn -B clean package -DskipTests -Pvelocity
-          cp "target/hmt-sync-${{ steps.version.outputs.VERSION }}-velocity.jar" dist/
-          echo "::endgroup::"
-          echo "::group::Building profile universal"
-          mvn -B clean package -DskipTests -Puniversal
-          cp "target/hmt-sync-${{ steps.version.outputs.VERSION }}-universal.jar" dist/
-          echo "::endgroup::"
-          ls -la dist/
+        mvn -B clean package -DskipTests -Puniversal
+        cp "target/hmt-sync-${version}-universal.jar" "release-build/example-plugin-${version}-universal.jar"
 
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v7
-        with:
-          name: hmt-sync-release-jars
-          path: dist/*.jar
-          if-no-files-found: error
+      artifacts-json: '[{"path":"release-build/hmt-sync-{version}-spigot.jar","loader":"spigot"},{"path":"release-build/hmt-sync-{version}-velocity.jar","loader":"velocity"},{"path":"release-build/hmt-sync-{version}-universal.jar","loader":"universal"}]'
 
-      - name: Create stable-named universal JAR
-        run: |
-          set -euo pipefail
-          # Second copy of the universal JAR under a version-less name so external
-          # store links (SpigotMC/CurseForge) can use releases/latest/download/<name>.
-          cp "dist/hmt-sync-${{ steps.version.outputs.VERSION }}-universal.jar" "dist/hmt-sync-universal.jar"
-          ls -la dist/
-
-      - name: Attach JARs to GitHub Release
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: ${{ github.event.release.tag_name }}
-          files: dist/*.jar
-          fail_on_unmatched_files: true
-
-      - name: Upload to Paper Hangar
-        uses: HMLabs-Gaming/Hangar-Publish@v2.3.0 # fork of milkdrinkers with PAPER subVersions fix; pin to a tag once released
-        with:
-          api_token: ${{ secrets.HANGAR_API_TOKEN }}
-          slug: HMTSync
-          version: ${{ steps.version.outputs.VERSION }}
-          channel: Release
-          description: ${{ github.event.release.body }}
-          # External files: Hangar only stores a download link (25 MiB nginx / 10 MB per-file upload limit).
-          # The JARs are attached to the GitHub Release in the step above, so these URLs must resolve.
-          # A single universal JAR is linked for both PAPER and VELOCITY (it carries every descriptor).
-          files: |
-            [
-              {
-                "url": true,
-                "externalUrl": "https://github.com/TitanSMP/HMTSync/releases/download/${{ github.event.release.tag_name }}/hmt-sync-${{ steps.version.outputs.VERSION }}-universal.jar",
-                "platforms": ["PAPER", "VELOCITY"]
-              }
-            ]
-          platform_dependencies: |
-            {
-              "PAPER": [">=26.3"],
-              "VELOCITY": [">=3.1.0"]
-            }
+      # Configure the files/platforms to match the variants supported by your plugin.
+      hangar-project-slug: HMTSync
+      hangar-channel: Release
+      hangar-files: '[{"path":"platform-assets/hmt-sync-*-spigot.jar","platforms":["PAPER"]}]'
+      # hangar-platform-dependencies: '{"PAPER":[">=1.21"]}'
+    secrets: inherit

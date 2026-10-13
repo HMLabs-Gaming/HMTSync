@@ -71,7 +71,7 @@ jobs:
           set -euo pipefail
           # Second copy of the universal JAR under a version-less name so external
           # store links (SpigotMC/CurseForge) can use releases/latest/download/<name>.
-          cp "dist/hmt-sync-${{ steps.version.outputs.VERSION }}-universal.jar" "dist/HMTSync-universal.jar"
+          cp "dist/hmt-sync-${{ steps.version.outputs.VERSION }}-universal.jar" "dist/hmt-sync-universal.jar"
           ls -la dist/
 
       - name: Attach JARs to GitHub Release

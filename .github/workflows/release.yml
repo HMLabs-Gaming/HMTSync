@@ -66,6 +66,14 @@ jobs:
           path: dist/*.jar
           if-no-files-found: error
 
+      - name: Create stable-named universal JAR
+        run: |
+          set -euo pipefail
+          # Second copy of the universal JAR under a version-less name so external
+          # store links (SpigotMC/CurseForge) can use releases/latest/download/<name>.
+          cp "dist/hmt-sync-${{ steps.version.outputs.VERSION }}-universal.jar" "dist/HMTSync-universal.jar"
+          ls -la dist/
+
       - name: Attach JARs to GitHub Release
         uses: softprops/action-gh-release@v3
         with:

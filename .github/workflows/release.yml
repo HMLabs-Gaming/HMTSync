@@ -17,16 +17,20 @@ jobs:
       build-command: |
         set -Eeuo pipefail
         version="${GITHUB_REF_NAME#v}"
+        pom_version="$(mvn -q -DforceStdout help:evaluate -Dexpression=project.version)"
         mkdir -p release-build
 
+        # The Maven Shade configuration currently emits target/hmt-sync-${pom_version}.jar
+        # (the <finalName> values in the profiles do not rename that output).
+        # Copy it immediately after each profile build, before the next clean removes it.
         mvn -B clean package -DskipTests -Pspigot
-        cp "target/hmt-sync-${version}-spigot.jar" "release-build/hmt-sync-${version}-spigot.jar"
+        cp "target/hmt-sync-${pom_version}.jar" "release-build/hmt-sync-${version}-spigot.jar"
 
         mvn -B clean package -DskipTests -Pvelocity
-        cp "target/hmt-sync-${version}-velocity.jar" "release-build/hmt-sync-${version}-velocity.jar"
+        cp "target/hmt-sync-${pom_version}.jar" "release-build/hmt-sync-${version}-velocity.jar"
 
         mvn -B clean package -DskipTests -Puniversal
-        cp "target/hmt-sync-${version}-universal.jar" "release-build/hmt-sync-${version}-universal.jar"
+        cp "target/hmt-sync-${pom_version}.jar" "release-build/hmt-sync-${version}-universal.jar"
 
       artifacts-json: '[{"path":"release-build/hmt-sync-{version}-spigot.jar","loader":"spigot"},{"path":"release-build/hmt-sync-{version}-velocity.jar","loader":"velocity"},{"path":"release-build/hmt-sync-{version}-universal.jar","loader":"universal"}]'
 

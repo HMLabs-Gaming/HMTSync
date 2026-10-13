@@ -34,7 +34,7 @@ jobs:
 
       hangar-project-slug: HMTSync
       hangar-channel: Release
-      # Hangar expects the exact key "externalUrl" (capital URL).
+      hangar-platform-dependencies: '{"PAPER":["26.3"],"VELOCITY":[">=3.1.0 <=4.2.1"]}'
       hangar-files: '[{"platforms":["PAPER","VELOCITY"],"url":true,"externalUrl":"https://github.com/TitanSMP/HMTSync/releases/download/{tag}/hmt-sync-{version}-universal.jar"}]'
     secrets:
       HANGAR_API_TOKEN: ${{ secrets.HANGAR_API_TOKEN }}

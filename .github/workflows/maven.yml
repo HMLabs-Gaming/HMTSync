@@ -179,14 +179,18 @@ jobs:
           version: ${{ steps.version.outputs.VERSION }}
           channel: Release
           description: ${{ github.event.release.body }}
+          # External files: Hangar only stores a download link (25 MiB nginx / 10 MB per-file upload limit).
+          # The JARs are attached to the GitHub Release in the step above, so these URLs must resolve.
           files: |
             [
               {
-                "path": "dist/hmt-sync-${{ steps.version.outputs.VERSION }}-spigot.jar",
+                "url": true,
+                "externalUrl": "https://github.com/TitanSMP/HMTSync/releases/download/${{ github.event.release.tag_name }}/hmt-sync-${{ steps.version.outputs.VERSION }}-spigot.jar",
                 "platforms": ["PAPER"]
               },
               {
-                "path": "dist/hmt-sync-${{ steps.version.outputs.VERSION }}-velocity.jar",
+                "url": true,
+                "externalUrl": "https://github.com/TitanSMP/HMTSync/releases/download/${{ github.event.release.tag_name }}/hmt-sync-${{ steps.version.outputs.VERSION }}-velocity.jar",
                 "platforms": ["VELOCITY"]
               }
             ]

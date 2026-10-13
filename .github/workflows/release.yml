@@ -1,0 +1,98 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Release: triggered when a GitHub release is published.
+  # Rebuilds (and tests) the Paper and Velocity JARs from the tagged commit,
+  # attaches them to the GitHub release and uploads each to Paper Hangar.
+  # ---------------------------------------------------------------------------
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Code (tag of the release)
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v6
+        with:
+          java-version: "25"
+          distribution: "temurin"
+          cache: maven
+
+      - name: Resolve and verify version
+        id: version
+        run: |
+          set -euo pipefail
+          TAG="${{ github.event.release.tag_name }}"
+          VERSION="${TAG#v}"
+          POM_VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
+          if [ "$VERSION" != "$POM_VERSION" ]; then
+            echo "::error::Release tag '$TAG' (=> '$VERSION') does not match the pom.xml version '$POM_VERSION'."
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Build release JARs (Paper with tests, Velocity)
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          echo "::group::Building profile spigot (tests enabled)"
+          mvn -B verify -Pspigot
+          cp "target/hmt-sync-${{ steps.version.outputs.VERSION }}-spigot.jar" dist/
+          echo "::endgroup::"
+          echo "::group::Building profile velocity"
+          mvn -B clean package -DskipTests -Pvelocity
+          cp "target/hmt-sync-${{ steps.version.outputs.VERSION }}-velocity.jar" dist/
+          echo "::endgroup::"
+          ls -la dist/
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: hmt-sync-release-jars
+          path: dist/*.jar
+          if-no-files-found: error
+
+      - name: Attach JARs to GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.event.release.tag_name }}
+          files: dist/*.jar
+          fail_on_unmatched_files: true
+
+      - name: Upload to Paper Hangar
+        uses: HMLabs-Gaming/Hangar-Publish@v2.3.0 # fork of milkdrinkers with PAPER subVersions fix; pin to a tag once released
+        with:
+          api_token: ${{ secrets.HANGAR_API_TOKEN }}
+          slug: HMTSync
+          version: ${{ steps.version.outputs.VERSION }}
+          channel: Release
+          description: ${{ github.event.release.body }}
+          # External files: Hangar only stores a download link (25 MiB nginx / 10 MB per-file upload limit).
+          # The JARs are attached to the GitHub Release in the step above, so these URLs must resolve.
+          files: |
+            [
+              {
+                "url": true,
+                "externalUrl": "https://github.com/TitanSMP/HMTSync/releases/download/${{ github.event.release.tag_name }}/hmt-sync-${{ steps.version.outputs.VERSION }}-spigot.jar",
+                "platforms": ["PAPER"]
+              },
+              {
+                "url": true,
+                "externalUrl": "https://github.com/TitanSMP/HMTSync/releases/download/${{ github.event.release.tag_name }}/hmt-sync-${{ steps.version.outputs.VERSION }}-velocity.jar",
+                "platforms": ["VELOCITY"]
+              }
+            ]
+          platform_dependencies: |
+            {
+              "PAPER": [">=26.3"],
+              "VELOCITY": [">=3.1.0"]
+            }

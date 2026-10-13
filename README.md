@@ -1,6 +1,7 @@
 # HMT Sync
 
 [![Hangar](https://cdn.jsdelivr.net/npm/@intergrav/devins-badges@3/assets/cozy/available/hangar_vector.svg)](https://hangar.papermc.io/HMLabs-Gaming/HMTSync)
+[![SpigotMC](https://cdn.jsdelivr.net/npm/@intergrav/devins-badges@3/assets/cozy/available/spigot_vector.svg)](https://www.spigotmc.org/resources/hmtsync.139621/)
 [![GitHub](https://cdn.jsdelivr.net/npm/@intergrav/devins-badges@3/assets/cozy/available/github_vector.svg)](https://github.com/TitanSMP/HMTSync)
 
 ![Minecraft Version](https://img.shields.io/badge/Minecraft-26.3-blue?style=for-the-badge&logo=minecraft)

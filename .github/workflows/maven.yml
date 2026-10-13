@@ -88,8 +88,25 @@ jobs:
 
           echo "All pre-release metadata checks passed."
 
-      - name: Build with Maven
-        run: mvn -B verify --file pom.xml
+      - name: Build backend JAR (Paper) and run tests
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          mvn -B verify -Pspigot
+          cp target/hmt-sync-*-spigot.jar dist/
+
+      - name: Build proxy JAR (Velocity)
+        run: |
+          set -euo pipefail
+          mvn -B clean package -DskipTests -Pvelocity
+          cp target/hmt-sync-*-velocity.jar dist/
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: hmt-sync-jars
+          path: dist/*.jar
+          if-no-files-found: error
 
   # ---------------------------------------------------------------------------
   # Release: triggered when a GitHub release is published.
@@ -139,6 +156,13 @@ jobs:
             echo "::endgroup::"
           done
           ls -la dist/
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: hmt-sync-release-jars
+          path: dist/*.jar
+          if-no-files-found: error
 
       - name: Attach JARs to GitHub Release
         uses: softprops/action-gh-release@v2

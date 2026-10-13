@@ -1,5 +1,8 @@
 # HMT Sync
 
+[![Hangar](https://cdn.jsdelivr.net/npm/@intergrav/devins-badges@3/assets/cozy/available/hangar_vector.svg)](https://hangar.papermc.io/HMLabs-Gaming/HMTSync)
+[![GitHub](https://cdn.jsdelivr.net/npm/@intergrav/devins-badges@3/assets/cozy/available/github_vector.svg)](https://github.com/TitanSMP/HMTSync)
+
 ![Minecraft Version](https://img.shields.io/badge/Minecraft-26.3-blue?style=for-the-badge&logo=minecraft)
 ![Platform](https://img.shields.io/badge/Platform-Paper%20%7C%20Spigot%20%7C%20Velocity-brightgreen?style=for-the-badge)
 ![Java](https://img.shields.io/badge/Java-25-orange?style=for-the-badge&logo=openjdk&logoColor=white)
@@ -10,7 +13,7 @@ HMT Sync is a robust, high-performance plugin for **PaperMC/Spigot** backends an
 It synchronizes player data across multiple Minecraft servers, ensuring a consistent experience by
 retaining health, hunger, experience, inventory, and much more as players move between linked servers.
 
-> A fork of *MC Data Bridge*, rebranded and maintained for the HMT Network.
+> A fork of _MC Data Bridge_, rebranded and maintained for the HMT Network.
 
 ---
 
@@ -40,10 +43,10 @@ retaining health, hunger, experience, inventory, and much more as players move b
 
 Separate JARs are shipped for each platform:
 
-| JAR | Platform |
-| --- | --- |
-| `hmt-sync-<version>-spigot.jar` | Paper / Spigot / Purpur backends |
-| `hmt-sync-<version>-velocity.jar` | Velocity proxy |
+| JAR                               | Platform                         |
+| --------------------------------- | -------------------------------- |
+| `hmt-sync-<version>-spigot.jar`   | Paper / Spigot / Purpur backends |
+| `hmt-sync-<version>-velocity.jar` | Velocity proxy                   |
 
 The backend and proxy JARs share the same codebase but contain platform-specific plugin metadata
 (`plugin.yml` vs. `velocity-plugin.json`).
@@ -89,25 +92,25 @@ The backend and proxy JARs share the same codebase but contain platform-specific
 
 Each component below can be enabled or disabled individually under `sync-data` in `config.yml`:
 
-| Component | Config key | Default |
-| --- | --- | --- |
-| Health | `health` | on |
-| Food level, saturation & exhaustion | `food-level` | on |
-| Experience (total, current, level) | `experience` | on |
-| Inventory | `inventory` | on |
-| Armor | `armor` | on |
-| Active potion effects | `potion-effects` | on |
-| Ender chest | `ender-chest` | off |
-| Location (world / x / y / z / yaw / pitch) | `location` | off |
-| Advancements + discovered recipes | `advancements` | off |
-| Statistics (all types) | `statistics` | off |
-| PersistentDataContainer (PDC) values | `pdc` | off |
-| Flight & gamemode | `flight-gamemode` | off |
-| Separate per-gamemode inventories | `separate-gamemode-inventories` | off |
-| Companions / pets | `companions` | off |
-| Maps (cross-server map sync) | `maps` | off |
-| Economy (Vault) | `economy` | off |
-| Playtime (EssentialsX) | `playtime` | off |
+| Component                                  | Config key                      | Default |
+| ------------------------------------------ | ------------------------------- | ------- |
+| Health                                     | `health`                        | on      |
+| Food level, saturation & exhaustion        | `food-level`                    | on      |
+| Experience (total, current, level)         | `experience`                    | on      |
+| Inventory                                  | `inventory`                     | on      |
+| Armor                                      | `armor`                         | on      |
+| Active potion effects                      | `potion-effects`                | on      |
+| Ender chest                                | `ender-chest`                   | off     |
+| Location (world / x / y / z / yaw / pitch) | `location`                      | off     |
+| Advancements + discovered recipes          | `advancements`                  | off     |
+| Statistics (all types)                     | `statistics`                    | off     |
+| PersistentDataContainer (PDC) values       | `pdc`                           | off     |
+| Flight & gamemode                          | `flight-gamemode`               | off     |
+| Separate per-gamemode inventories          | `separate-gamemode-inventories` | off     |
+| Companions / pets                          | `companions`                    | off     |
+| Maps (cross-server map sync)               | `maps`                          | off     |
+| Economy (Vault)                            | `economy`                       | off     |
+| Playtime (EssentialsX)                     | `playtime`                      | off     |
 
 ### Redis hybrid cache (optional)
 
@@ -309,9 +312,9 @@ database:
   pool-settings:
     maximum-pool-size: 10
     minimum-idle: 10
-    max-lifetime: 1800000   # 30 minutes
+    max-lifetime: 1800000 # 30 minutes
     connection-timeout: 5000
-    idle-timeout: 600000    # 10 minutes
+    idle-timeout: 600000 # 10 minutes
 
   optimizations:
     cache-prep-stmts: true
@@ -435,19 +438,19 @@ Key options:
 
 ### Backends (Paper/Spigot)
 
-| Command | Description | Permission |
-| --- | --- | --- |
-| `/hmtsync unlock <player>` | Manually release a player's data lock | `hmtsync.admin` |
-| `/hmtsync inspect <player> [inventory\|enderchest] [--edit]` | Open the data inspector GUI | `hmtsync.inspect` (edit: `hmtsync.inspect.edit`) |
-| `/hmtsync invsee <player> [--edit]` | Open a player's inventory | `hmtsync.inspect` (edit: `hmtsync.inspect.edit`) |
-| `/hmtsync endersee <player> [--edit]` | Open a player's ender chest | `hmtsync.inspect` (edit: `hmtsync.inspect.edit`) |
-| `/hmtsync migrate <source> <target>` | Migrate data between two identities | `hmtsync.admin` |
-| `/hmtsync-debug <status\|test-economy\|test-playtime\|test-enderchest>` | Diagnostics | `hmtsync.admin` |
+| Command                                                                 | Description                           | Permission                                       |
+| ----------------------------------------------------------------------- | ------------------------------------- | ------------------------------------------------ |
+| `/hmtsync unlock <player>`                                              | Manually release a player's data lock | `hmtsync.admin`                                  |
+| `/hmtsync inspect <player> [inventory\|enderchest] [--edit]`            | Open the data inspector GUI           | `hmtsync.inspect` (edit: `hmtsync.inspect.edit`) |
+| `/hmtsync invsee <player> [--edit]`                                     | Open a player's inventory             | `hmtsync.inspect` (edit: `hmtsync.inspect.edit`) |
+| `/hmtsync endersee <player> [--edit]`                                   | Open a player's ender chest           | `hmtsync.inspect` (edit: `hmtsync.inspect.edit`) |
+| `/hmtsync migrate <source> <target>`                                    | Migrate data between two identities   | `hmtsync.admin`                                  |
+| `/hmtsync-debug <status\|test-economy\|test-playtime\|test-enderchest>` | Diagnostics                           | `hmtsync.admin`                                  |
 
 ### Proxy (Velocity)
 
-| Command | Description | Permission |
-| --- | --- | --- |
+| Command                                  | Description                             | Permission      |
+| ---------------------------------------- | --------------------------------------- | --------------- |
 | `/hmtsync unlock <player>` (alias `/db`) | Relay an unlock request to the backends | `hmtsync.admin` |
 
 Any other `/hmtsync ...` invocation made on the proxy is forwarded to the backend command.
@@ -456,11 +459,11 @@ Any other `/hmtsync ...` invocation made on the proxy is forwarded to the backen
 
 ## Permissions
 
-| Permission | Default | Description |
-| --- | --- | --- |
-| `hmtsync.admin` | op | Admin commands, unlock/migrate and debug tools |
-| `hmtsync.inspect` | op | View-only inspection of player data and inventories |
-| `hmtsync.inspect.edit` | op | Interactive editing of player data and inventories |
+| Permission             | Default | Description                                         |
+| ---------------------- | ------- | --------------------------------------------------- |
+| `hmtsync.admin`        | op      | Admin commands, unlock/migrate and debug tools      |
+| `hmtsync.inspect`      | op      | View-only inspection of player data and inventories |
+| `hmtsync.inspect.edit` | op      | Interactive editing of player data and inventories  |
 
 ---
 
@@ -469,13 +472,13 @@ Any other `/hmtsync ...` invocation made on the proxy is forwarded to the backen
 All integrations are optional and are ignored safely when the backing plugin is missing, so a
 partially-installed network can never overwrite balances or playtime with zeros.
 
-| Integration | Required for | Notes |
-| --- | --- | --- |
-| **Vault** + an economy provider | `sync-data.economy` | The synced balance is authoritative and overwritten on join. |
-| **EssentialsX** | `sync-data.playtime` | Playtime is cumulative and only raised on join. |
-| **FastLogin** | `identity.auto-migrate-fastlogin` | Auto-migrates data for verified premium users. |
-| **AuthMe** | `identity.auto-migrate-authme` | Auto-migrates data after a successful AuthMe login. |
-| **item-nbt-api** | bundled | Shaded and relocated into `de.jumpstone.plugins.nbtapi`. |
+| Integration                     | Required for                      | Notes                                                        |
+| ------------------------------- | --------------------------------- | ------------------------------------------------------------ |
+| **Vault** + an economy provider | `sync-data.economy`               | The synced balance is authoritative and overwritten on join. |
+| **EssentialsX**                 | `sync-data.playtime`              | Playtime is cumulative and only raised on join.              |
+| **FastLogin**                   | `identity.auto-migrate-fastlogin` | Auto-migrates data for verified premium users.               |
+| **AuthMe**                      | `identity.auto-migrate-authme`    | Auto-migrates data after a successful AuthMe login.          |
+| **item-nbt-api**                | bundled                           | Shaded and relocated into `de.jumpstone.plugins.nbtapi`.     |
 
 ---
 
@@ -484,13 +487,13 @@ partially-installed network can never overwrite balances or playtime with zeros.
 When `metrics.enabled` is `true`, an embedded HTTP server exposes Prometheus metrics at
 `metrics.path` on `metrics.port`:
 
-| Metric | Type | Description |
-| --- | --- | --- |
-| `hmt_sync_hikari_active_connections` | gauge | Active connections currently executing reads/writes |
-| `hmt_sync_hikari_pending_threads` | gauge | Threads blocked waiting for a database socket |
-| `hmt_sync_lock_acquisition_latency_ms` | gauge | Time spent inside `acquireLock` transactions |
-| `hmt_sync_lock_contention_retries_total` | counter | Polling hitches where a server must sleep and loop |
-| `hmt_sync_sync_failures_total` | counter | Identity-hash mismatches or checksum rejections |
+| Metric                                   | Type    | Description                                         |
+| ---------------------------------------- | ------- | --------------------------------------------------- |
+| `hmt_sync_hikari_active_connections`     | gauge   | Active connections currently executing reads/writes |
+| `hmt_sync_hikari_pending_threads`        | gauge   | Threads blocked waiting for a database socket       |
+| `hmt_sync_lock_acquisition_latency_ms`   | gauge   | Time spent inside `acquireLock` transactions        |
+| `hmt_sync_lock_contention_retries_total` | counter | Polling hitches where a server must sleep and loop  |
+| `hmt_sync_sync_failures_total`           | counter | Identity-hash mismatches or checksum rejections     |
 
 ---
 

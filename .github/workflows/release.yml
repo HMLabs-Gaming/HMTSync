@@ -1,7 +1,6 @@
-# Caller example: copy to the consuming plugin repository at .github/workflows/release.yml.
-# Multi-JAR example for plugins that build distinct Spigot, Velocity, and universal artifacts.
-# Keep only the profiles/artifacts that your plugin really supports.
-name: Multi-JAR Plugin Release
+# Caller workflow for HMTSync. Publishes external GitHub Release download links to Hangar.
+name: HMTSync Release
+
 on:
   release:
     types: [published]
@@ -20,22 +19,20 @@ jobs:
         version="${GITHUB_REF_NAME#v}"
         mkdir -p release-build
 
-        # Build each profile separately. The clean build prevents platform metadata
-        # from one profile leaking into another profile's JAR.
         mvn -B clean package -DskipTests -Pspigot
-        cp "target/hmt-sync-${version}-spigot.jar" "release-build/example-plugin-${version}-spigot.jar"
+        cp "target/hmt-sync-${version}-spigot.jar" "release-build/hmt-sync-${version}-spigot.jar"
 
         mvn -B clean package -DskipTests -Pvelocity
-        cp "target/hmt-sync-${version}-velocity.jar" "release-build/example-plugin-${version}-velocity.jar"
+        cp "target/hmt-sync-${version}-velocity.jar" "release-build/hmt-sync-${version}-velocity.jar"
 
         mvn -B clean package -DskipTests -Puniversal
-        cp "target/hmt-sync-${version}-universal.jar" "release-build/example-plugin-${version}-universal.jar"
+        cp "target/hmt-sync-${version}-universal.jar" "release-build/hmt-sync-${version}-universal.jar"
 
       artifacts-json: '[{"path":"release-build/hmt-sync-{version}-spigot.jar","loader":"spigot"},{"path":"release-build/hmt-sync-{version}-velocity.jar","loader":"velocity"},{"path":"release-build/hmt-sync-{version}-universal.jar","loader":"universal"}]'
 
-      # Configure the files/platforms to match the variants supported by your plugin.
       hangar-project-slug: HMTSync
       hangar-channel: Release
-      hangar-files: '[{"path":"platform-assets/hmt-sync-*-spigot.jar","platforms":["PAPER"]}]'
-      # hangar-platform-dependencies: '{"PAPER":[">=1.21"]}'
+      # Do not upload the JAR to Hangar; link to the universal asset on GitHub Releases.
+      # {tag} and {version} are expanded by the reusable workflow.
+      hangar-files: '[{"platforms":["PAPER","VELOCITY"],"url":true,"externalUrl":"https://github.com/TitanSMP/HMTSync/releases/download/{tag}/hmt-sync-{version}-universal.jar"}]'
     secrets: inherit

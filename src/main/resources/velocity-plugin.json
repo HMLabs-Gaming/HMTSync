@@ -4,5 +4,6 @@
   "version": "1.0.3",
   "description": "A data synchronization system for Minecraft servers.",
   "authors": ["jumpstone"],
-  "main": "de.jumpstone.plugins.proxy.velocity.VelocityHMTSync"
+  "main": "de.jumpstone.plugins.proxy.velocity.VelocityHMTSync",
+  "supportedVelocityVersions": [">=3.1.0 <=4.2.1"]
 }
